@@ -1,17 +1,17 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import seaborn as sns
 
 import backtrader as bt
 import datetime
+import math
 import csv
 import os
 
 from ast import literal_eval
 
 
-class VarInit:
+class MetaVar:
 
     valid_contracts = ["IF00", "IH00", "IC00"]
 
@@ -23,7 +23,7 @@ class VarInit:
             print("Invalid contract name...")
 
         # 回测区间设置
-        self.fromdate = datetime.datetime(2010, 4, 16)
+        self.fromdate = datetime.datetime(2010, 4, 20)
         self.todate = datetime.datetime(2013, 4, 16)
 
         # 回测周期设置
@@ -32,11 +32,11 @@ class VarInit:
 
         # 交易时间表
         # filepath = os.path.join(os.curdir, 'trading_time', self.contract + '_time.csv')  # 5min data
-        filepath = os.path.join(os.curdir, "trading_time", self.contract + "_1mtime.csv")  # 1min data
+        filepath = os.path.join(os.path.abspath('.'), "trading_time", self.contract + "_1mtime.csv")  # 1min data
         self.time_df = pd.read_csv(filepath, index_col="date")
 
         # 初始资金设置
-        self.startcash = 10_000_000
+        self.startcash = 100_000_000
 
         # 交易手续费设置
         self.closeout_type = 1  # 1代表平今仓，0代表止盈止损平仓
@@ -58,16 +58,14 @@ class VarInit:
         # 印花税设置
         self.stamp_duty = 0.001
 
-
-var = VarInit("IF00")
-
+var = MetaVar("IF00")
 
 class CumNoise(bt.Strategy):
     params = dict(
         period=var.period,  # 移动平均区间
         window=var.window,  # 累积窗口
         close_limit=0.02,  # 平仓限额
-        target_percent=0.02,  # 目标订单比例
+        target_percent=0.30,  # 目标订单比例
     )
 
     def __init__(self):
@@ -106,6 +104,9 @@ class CumNoise(bt.Strategy):
                     f"BUY EXECUTED {order.executed.price:.2f}, SIZE {order.executed.size:.2f}, COST {order.executed.value:.2f}, COMMISSION {order.executed.comm:.2f}"
                 )
 
+                if order.info:
+                    self.log(f"INFO {order.info['name']}")
+
                 self.buy_price = order.executed.price
 
             elif order.issell():
@@ -114,6 +115,9 @@ class CumNoise(bt.Strategy):
                 self.log(
                     f"SELL EXECUTED {order.executed.price:.2f}, SIZE {order.executed.size:.2f}, COST {order.executed.value:.2f}, COMMISSION {order.executed.comm:.2f}"
                 )
+
+                if order.info:
+                    self.log(f"INFO {order.info['name']}")
 
                 self.sell_price = order.executed.price
 
@@ -155,8 +159,13 @@ class CumNoise(bt.Strategy):
         # 当天的交易时间段
         today = bt.num2date(self.datadatetime[0]).date()
         trading_period = literal_eval(self.get_tradetime(today).values[0])
+        open_time = trading_period[0]  # open price for stoplimit
         close_time = trading_period[-2]  # 使用收盘时间前一个bar作为平今仓信号
         now = bt.num2time(self.datadatetime[0]).isoformat()
+
+        # 记录开盘价
+        if now == open_time:
+            self.dayopen = self.dataopen[0]
 
         # 如果有正在进行中的订单或当前已下过订单
         if self.order or now == self.ordermin:
@@ -166,8 +175,8 @@ class CumNoise(bt.Strategy):
         cum_noise = self.get_cum_noise(self.dataclose, self.p.period, self.p.window)
 
         # 累积量标准差
-        cum_noise_std = np.sqrt(
-            np.sum([self.get_moving_std(-i, self.dataclose, self.p.period) ** 2 for i in range(self.p.window)])
+        cum_noise_std = math.sqrt(
+            math.fsum([self.get_moving_std(-i, self.dataclose, self.p.period) ** 2 for i in range(self.p.window)])
         )
 
         # 定义交易信号（两倍标准差）
@@ -176,23 +185,28 @@ class CumNoise(bt.Strategy):
 
         # 下订单
         var.closeout_type = 0
+        # 平今仓
         if now == close_time and self.position:
             var.closeout_type = 1
             self.order = self.close()
             self.log("CLOSE OUT AT THE END OF DAY (NEXT BAR)")
         else:
-            if long_sig:
-                self.order = self.order_target_percent(target=self.p.target_percent)
-                self.counter_order = self.sell(
-                    exectype=bt.Order.StopTrail, trailpercent=self.p.close_limit,
-                    price=self.order.price
-                )
-            if short_sig:
-                self.order = self.order_target_percent(target=-self.p.target_percent)
-                self.counter_order = self.buy(
-                    exectype=bt.Order.StopTrail, trailpercent=-self.p.close_limit,
-                    price=self.order.price
-                )
+            # 开仓逻辑
+            if not self.position:
+                if long_sig:
+                    self.order = self.order_target_percent(target=self.p.target_percent)
+                elif short_sig:
+                    self.order = self.order_target_percent(target=-self.p.target_percent)
+            # 平仓逻辑
+            else:
+                pct_change = self.dataclose[0] / self.dayopen - 1
+                cur_pos = self.broker.getposition(data=self.datas[0]).size
+                long_close_sig = cur_pos > 0 and (pct_change < -self.p.close_limit)  # 持有多头且下跌超过阈值
+                short_close_sig = cur_pos < 0 and (pct_change > self.p.close_limit)  # 持有空头且上涨超过阈值
+                
+                if long_close_sig or short_close_sig:    
+                    self.order = self.order_target_percent(target=0)  # 0表示为平仓
+                    self.order.addinfo(name="CLOSE OUT BECAUSE OF THE STOPLIMIT")
 
         # 将交易数据写入本地文件
         self.write_obs(-1)
@@ -201,7 +215,7 @@ class CumNoise(bt.Strategy):
         """回测结束后的最后一个bar运行"""
         self.write_obs(0)
 
-    def get_tradetime(self, today) -> list:
+    def get_tradetime(self, today):
         """获取当日所有交易时间点"""
         return var.time_df.loc[today.isoformat()]
 
@@ -217,7 +231,7 @@ class CumNoise(bt.Strategy):
         """
         cum_noise = 0
         for t in range(window):
-            sma = np.mean([data.get(ago=t, size=nper)])
+            sma = math.fsum(data.get(ago=t, size=nper)) / nper
             noise = data[-t] - sma
             cum_noise += noise
 
@@ -234,18 +248,6 @@ class CumNoise(bt.Strategy):
         nper: 移动平均的周期
         """
         return np.std(data.get(ago=t, size=nper), ddof=1)
-
-    def dobuy(self):
-        self.order = self.order_target_percent(target=self.p.target_percent)
-        self.counter_order = self.sell(
-            exectype=bt.Order.StopTrail, trailpercent=self.p.close_limit, price=self.buy_price
-        )
-
-    def dosell(self):
-        self.order = self.order_target_percent(target=self.p.target_percent)
-        self.counter_order = self.buy(
-            exectype=bt.Order.StopTrail, trailpercent=self.p.close_limit, price=self.sell_price
-        )
 
     def write_obs(self, t):
         self.mystats.writerow(
@@ -277,7 +279,7 @@ class FurCommInfo(bt.CommInfoBase):
         margin=var.margin,
     )
 
-    def _getcommission(self, size, price, pseudoexec):
+    def _getcommission(self, size, price, pseudoexec=True):
         """
         手续费=买卖手数*合约价格*手续费比例*合约乘数
 
@@ -357,7 +359,6 @@ class InputData(bt.feeds.PandasData):
         volume=4,
         openinterest=-1,
     )
-
 
 # 数据预处理
 # cols = [
@@ -503,7 +504,7 @@ results_dict = {
 }
 
 results_df = pd.Series(results_dict)
-results_df
+print(results_df)
 
 # print(f"年化夏普比率: {annual_sharpe:.2f}")
 # print(f"最大回撤: {dd * -1 / 100:.2%}")
