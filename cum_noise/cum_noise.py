@@ -6,9 +6,24 @@ import backtrader as bt
 import datetime
 import math
 import csv
-import os
+import os, sys
 
 from ast import literal_eval
+
+
+class Logger:
+    """将输出内容保存到本地文件"""
+
+    def __init__(self, filename="trades.log"):
+        self.terminal = sys.stdout
+        self.log = open(filename, "w")
+
+    def write(self, msg):
+        self.terminal.write(msg)
+        self.log.write(msg)
+
+    def flush(self):
+        pass
 
 
 class MetaVar:
@@ -23,20 +38,20 @@ class MetaVar:
             print("Invalid contract name...")
 
         # 回测区间设置
-        self.fromdate = datetime.datetime(2010, 4, 20)
+        self.fromdate = datetime.datetime(2010, 4, 16)
         self.todate = datetime.datetime(2013, 4, 16)
 
-        # 回测周期设置
+        # 回测周期设置  ==待优化==
         self.period = 14
         self.window = 9
 
         # 交易时间表
         # filepath = os.path.join(os.curdir, 'trading_time', self.contract + '_time.csv')  # 5min data
-        filepath = os.path.join(os.path.abspath('.'), "trading_time", self.contract + "_1mtime.csv")  # 1min data
+        filepath = os.path.join(os.path.abspath("."), "trading_time", self.contract + "_1mtime.csv")  # 1min data
         self.time_df = pd.read_csv(filepath, index_col="date")
 
         # 初始资金设置
-        self.startcash = 100_000_000
+        self.startcash = 10_000_000
 
         # 交易手续费设置
         self.closeout_type = 1  # 1代表平今仓，0代表止盈止损平仓
@@ -58,7 +73,9 @@ class MetaVar:
         # 印花税设置
         self.stamp_duty = 0.001
 
+
 var = MetaVar("IF00")
+
 
 class CumNoise(bt.Strategy):
     params = dict(
@@ -96,12 +113,15 @@ class CumNoise(bt.Strategy):
 
         # 处理已完成订单
         if order.status == order.Completed:
+            # 保证金占用
+            margin_used = order.executed.price * abs(order.executed.size) * var.mult * var.margin
+
             if order.isbuy():
                 # 记录订单完成时间
                 self.ordermin = bt.num2time(self.datadatetime[0]).isoformat()
                 self.log(f"LONG SIG DETECTED @ {order.created.price:.2f}")
                 self.log(
-                    f"BUY EXECUTED {order.executed.price:.2f}, SIZE {order.executed.size:.2f}, COST {order.executed.value:.2f}, COMMISSION {order.executed.comm:.2f}"
+                    f"BUY EXECUTED {order.executed.price:.2f}, SIZE {order.executed.size:.2f}, COST {order.executed.value:.2f}, COMMISSION {order.executed.comm:.2f}, MARGIN {margin_used:.2f}"
                 )
 
                 if order.info:
@@ -113,7 +133,7 @@ class CumNoise(bt.Strategy):
                 self.ordermin = bt.num2time(self.datadatetime[0]).isoformat()
                 self.log(f"SHORT SIG DETECTED @ {order.created.price:.2f}")
                 self.log(
-                    f"SELL EXECUTED {order.executed.price:.2f}, SIZE {order.executed.size:.2f}, COST {order.executed.value:.2f}, COMMISSION {order.executed.comm:.2f}"
+                    f"SELL EXECUTED {order.executed.price:.2f}, SIZE {order.executed.size:.2f}, COST {order.executed.value:.2f}, COMMISSION {order.executed.comm:.2f}, MARGIN {margin_used:.2f}"
                 )
 
                 if order.info:
@@ -160,26 +180,32 @@ class CumNoise(bt.Strategy):
         today = bt.num2date(self.datadatetime[0]).date()
         trading_period = literal_eval(self.get_tradetime(today).values[0])
         open_time = trading_period[0]  # open price for stoplimit
-        close_time = trading_period[-2]  # 使用收盘时间前一个bar作为平今仓信号
+        close_time = trading_period[-2]  # 在收盘前一个bar发出平仓信号
         now = bt.num2time(self.datadatetime[0]).isoformat()
 
         # 记录开盘价
         if now == open_time:
             self.dayopen = self.dataopen[0]
 
-        # 如果有正在进行中的订单或当前已下过订单
-        if self.order or now == self.ordermin:
+        # 符合一下任一条件时跳过当前交易日
+        bypass_conds = [
+            self.order,  # 存在正在进行中的订单
+            now == self.ordermin,  # 防止重复下单
+            len(self) < var.period + var.window,  # 在此之前无法计算累积量
+        ]
+        if any(bypass_conds):
             return
 
+        # 计算交易信号
         # 噪声累积量
         cum_noise = self.get_cum_noise(self.dataclose, self.p.period, self.p.window)
 
         # 累积量标准差
         cum_noise_std = math.sqrt(
-            math.fsum([self.get_moving_std(-i, self.dataclose, self.p.period) ** 2 for i in range(self.p.window)])
+            math.fsum([self.get_moving_std(i, self.dataclose, self.p.period) ** 2 for i in range(self.p.window)])
         )
 
-        # 定义交易信号（两倍标准差）
+        # +/- 2x std
         long_sig = cum_noise > 2 * cum_noise_std
         short_sig = cum_noise < -2 * cum_noise_std
 
@@ -189,7 +215,7 @@ class CumNoise(bt.Strategy):
         if now == close_time and self.position:
             var.closeout_type = 1
             self.order = self.close()
-            self.log("CLOSE OUT AT THE END OF DAY (NEXT BAR)")
+            self.order.addinfo(name="CLOSE OUT AT THE END OF DAY")
         else:
             # 开仓逻辑
             if not self.position:
@@ -203,10 +229,10 @@ class CumNoise(bt.Strategy):
                 cur_pos = self.broker.getposition(data=self.datas[0]).size
                 long_close_sig = cur_pos > 0 and (pct_change < -self.p.close_limit)  # 持有多头且下跌超过阈值
                 short_close_sig = cur_pos < 0 and (pct_change > self.p.close_limit)  # 持有空头且上涨超过阈值
-                
-                if long_close_sig or short_close_sig:    
+
+                if long_close_sig or short_close_sig:
                     self.order = self.order_target_percent(target=0)  # 0表示为平仓
-                    self.order.addinfo(name="CLOSE OUT BECAUSE OF THE STOPLIMIT")
+                    self.order.addinfo(name="CLOSE OUT DUE TO STOPLIMIT")
 
         # 将交易数据写入本地文件
         self.write_obs(-1)
@@ -231,8 +257,11 @@ class CumNoise(bt.Strategy):
         """
         cum_noise = 0
         for t in range(window):
-            sma = math.fsum(data.get(ago=t, size=nper)) / nper
-            noise = data[-t] - sma
+            sma = math.fsum(data.get(ago=-t, size=nper)) / nper
+            if sma == 0:  # no sma because of lacking data
+                noise = 0
+            else:
+                noise = data[-t] - sma
             cum_noise += noise
 
         return cum_noise
@@ -247,7 +276,7 @@ class CumNoise(bt.Strategy):
         data: 收盘价序列
         nper: 移动平均的周期
         """
-        return np.std(data.get(ago=t, size=nper), ddof=1)
+        return np.std(data.get(ago=-t, size=nper), ddof=1)
 
     def write_obs(self, t):
         self.mystats.writerow(
@@ -299,7 +328,8 @@ class FurCommInfo(bt.CommInfoBase):
 
     def get_margin(self, price):
         """每笔交易保证金=合约价格*合约乘数*保证金比例"""
-        return price * self.p.mult * self.p.margin
+        return price * self.p.mult  # 不加杠杆
+        # return price * self.p.mult * self.p.margin
 
 
 class ATRSizer(bt.Sizer):
@@ -360,21 +390,25 @@ class InputData(bt.feeds.PandasData):
         openinterest=-1,
     )
 
+
+# 将打印内容保存到本地
+sys.stdout = Logger()
+
 # 数据预处理
-# cols = [
-#         "S_DQ_ADJOPEN",
-#         "S_DQ_ADJHIGH",
-#         "S_DQ_ADJLOW",
-#         "S_DQ_ADJCLOSE",
-#         "S_DQ_VOLUME",
-#     ]
 cols = [
-    "S_DQ_OPEN",
-    "S_DQ_HIGH",
-    "S_DQ_LOW",
-    "S_DQ_CLOSE",
+    "S_DQ_ADJOPEN",
+    "S_DQ_ADJHIGH",
+    "S_DQ_ADJLOW",
+    "S_DQ_ADJCLOSE",
     "S_DQ_VOLUME",
-]  # 1min data
+]
+# cols = [
+#     "S_DQ_OPEN",
+#     "S_DQ_HIGH",
+#     "S_DQ_LOW",
+#     "S_DQ_CLOSE",
+#     "S_DQ_VOLUME",
+# ]  # 1min data
 
 filename = var.contract + ".csv"
 # filepath = os.path.join(os.path.curdir, '5m_main_contracts', filename)
@@ -564,10 +598,12 @@ ax1.tick_params(axis="y")
 
 ax2 = ax1.twinx()
 ax2.set_ylabel("Price")
-# df['S_DQ_ADJCLOSE'].loc[var.fromdate:var.todate].plot(ax=ax2, color='tab:blue', linewidth=3, grid=False, label=var.contract + '(right)')
-df["S_DQ_CLOSE"].loc[var.fromdate : var.todate].plot(
+df["S_DQ_ADJCLOSE"].loc[var.fromdate : var.todate].plot(
     ax=ax2, color="tab:blue", linewidth=3, grid=False, label=var.contract + "(right)"
 )
+# df["S_DQ_CLOSE"].loc[var.fromdate : var.todate].plot(
+#     ax=ax2, color="tab:blue", linewidth=3, grid=False, label=var.contract + "(right)"
+# )
 ax2.tick_params(axis="y")
 
 h1, l1 = ax1.get_legend_handles_labels()
