@@ -1,8 +1,14 @@
+# Author: Qizhong Deng
+# Date: 2021/12/26
+# Tested by Python 3.8.10
+
+# %%
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
 import backtrader as bt
+import empyrical as emp
 import datetime
 import math
 import csv
@@ -10,6 +16,10 @@ import os, sys
 
 from ast import literal_eval
 
+# Matplotlib init
+plt.style.use("ggplot")
+plt.rcParams["axes.unicode_minus"] = False
+plt.rcParams["font.family"] = ["Heiti TC"]  # Or any other Chinese characters
 
 class Logger:
     """将输出内容保存到本地文件"""
@@ -38,12 +48,12 @@ class MetaVar:
             print("Invalid contract name...")
 
         # 回测区间设置
-        self.fromdate = datetime.datetime(2010, 4, 16)
-        self.todate = datetime.datetime(2013, 4, 16)
+        self.fromdate = datetime.datetime(2019, 4, 16)
+        self.todate = datetime.datetime(2021, 12, 21)
 
         # 回测周期设置  ==待优化==
-        self.period = 14
-        self.window = 9
+        self.period = 15
+        self.window = 10
 
         # 交易时间表
         # filepath = os.path.join(os.curdir, 'trading_time', self.contract + '_time.csv')  # 5min data
@@ -51,7 +61,7 @@ class MetaVar:
         self.time_df = pd.read_csv(filepath, index_col="date")
 
         # 初始资金设置
-        self.startcash = 10_000_000
+        self.startcash = 100_000_000
 
         # 交易手续费设置
         self.closeout_type = 1  # 1代表平今仓，0代表止盈止损平仓
@@ -74,7 +84,7 @@ class MetaVar:
         self.stamp_duty = 0.001
 
 
-var = MetaVar("IF00")
+var = MetaVar("IC00")
 
 
 class CumNoise(bt.Strategy):
@@ -211,20 +221,20 @@ class CumNoise(bt.Strategy):
 
         # 下订单
         var.closeout_type = 0
-        # 平今仓
-        if now == close_time and self.position:
-            var.closeout_type = 1
-            self.order = self.close()
-            self.order.addinfo(name="CLOSE OUT AT THE END OF DAY")
-        else:
-            # 开仓逻辑
-            if not self.position:
-                if long_sig:
-                    self.order = self.order_target_percent(target=self.p.target_percent)
-                elif short_sig:
-                    self.order = self.order_target_percent(target=-self.p.target_percent)
-            # 平仓逻辑
+        # 开仓逻辑
+        if not self.position and now != close_time:
+            if long_sig:
+                self.order = self.order_target_percent(target=self.p.target_percent)
+            elif short_sig:
+                self.order = self.order_target_percent(target=-self.p.target_percent)
+        else: 
+            # 平今仓
+            if now == close_time and self.position:
+                var.closeout_type = 1
+                self.order = self.close()
+                self.order.addinfo(name="CLOSE OUT AT THE END OF DAY")
             else:
+                # 止损平仓
                 pct_change = self.dataclose[0] / self.dayopen - 1
                 cur_pos = self.broker.getposition(data=self.datas[0]).size
                 long_close_sig = cur_pos > 0 and (pct_change < -self.p.close_limit)  # 持有多头且下跌超过阈值
@@ -282,15 +292,15 @@ class CumNoise(bt.Strategy):
         self.mystats.writerow(
             [
                 self.datadatetime.datetime(t).strftime("%Y-%m-%d %H:%M:%S"),
-                f"{self.stats.drawdown.drawdown[0]:.2f}",
-                f"{self.stats.drawdown.maxdrawdown[0]:.2f}",
-                f"{self.stats.timereturn.timereturn[0]:.2f}",
-                f"{self.stats.broker.value[0]:.2f}",
-                f"{self.stats.broker.cash[0]:.2f}",
-                f"{self.stats.buysell.buy[0]:.2f}",
-                f"{self.stats.buysell.sell[0]:.2f}",
-                f"{self.stats.trades.pnlplus[0]:.2f}",
-                f"{self.stats.trades.pnlminus[0]:.2f}",
+                self.stats.drawdown.drawdown[0],
+                self.stats.drawdown.maxdrawdown[0],
+                self.stats.timereturn.timereturn[0],
+                self.stats.broker.value[0],
+                self.stats.broker.cash[0],
+                self.stats.buysell.buy[0],
+                self.stats.buysell.sell[0],
+                self.stats.trades.pnlplus[0],
+                self.stats.trades.pnlminus[0],
             ]
         )
 
@@ -352,7 +362,6 @@ class ATRSizer(bt.Sizer):
 
         return min(size, data.volume[0])  # 取计算所得值和当天成交量的最小值
 
-
 class ValueSizer(bt.Sizer):
     """基于金额的头寸管理"""
 
@@ -389,6 +398,12 @@ class InputData(bt.feeds.PandasData):
         volume=4,
         openinterest=-1,
     )
+
+
+class IndPlot:
+    def __init__(self, results):
+        self.df = results
+        
 
 
 # 将打印内容保存到本地
@@ -437,12 +452,8 @@ cerebro.broker.setcash(var.startcash)
 cerebro.addanalyzer(bt.analyzers.TimeReturn, _name="_TimeReturn")
 cerebro.addanalyzer(bt.analyzers.TimeDrawDown, _name="_TimeDrawDown")
 cerebro.addanalyzer(bt.analyzers.DrawDown, _name="_DrawDown")
-# cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name='_Sharpe', compression=252 * 54)
-# cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name='_Sharpe', compression=252 * 240)
-cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name="_Sharpe")
-cerebro.addanalyzer(bt.analyzers.SharpeRatio_A, _name="_AnnualSharpe")
-# cerebro.addanalyzer(bt.analyzers.Returns, _name='_AnnualReturn', tann=252 * 54)
-cerebro.addanalyzer(bt.analyzers.Returns, _name="_Return")
+cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name="_Sharpe", timeframe=bt.TimeFrame.Minutes, annualize=True)
+cerebro.addanalyzer(bt.analyzers.Returns, _name="_Return", timeframe=bt.TimeFrame.Minutes, tann=240*252)
 cerebro.addanalyzer(bt.analyzers.Calmar, _name="_CalmarRatio")
 
 # Observers
@@ -472,25 +483,35 @@ print(f"结束资金总额 {cerebro.broker.getvalue():.2f}")
 # Results
 strats = results[0]
 
+
 # cerebro.plot()
 
-
-def get_my_analysis(results):
+# %%
+def opt_analysis(results):
     analysers = {}
     # 返回参数
+    rets = pd.Series(results.analyzers._TimeReturn.get_analysis())
+    num_years = var.todate.year - var.fromdate.year
+    if num_years == 0:
+        num_years = 1
+    ann_rets = (cerebro.broker.get_value() / var.startcash - 1) / num_years
+    
+    # 夏普比率
+    ann_std = emp.annual_volatility(rets)
+    risk_free = 0.01
+    
+    analysers['return'] = ann_rets
+    analysers['max_drawdown'] = emp.max_drawdown(rets)
+    analysers['calmar_ratio'] = emp.calmar_ratio(rets)
+    analysers['sharpe'] = (ann_rets - risk_free) / ann_std
     analysers["period"] = results.params.period
     analysers["window"] = results.params.window
-
-    # 提取信息
-    analysers["A_Sharpe"] = results.analyzers._AnnualSharpe.get_analysis()["sharperatio"]
-    analysers["Max_Drawdown"] = results.analyzers._DrawDown.get_analysis()["max"]["drawdown"]
-    analysers["A_Rets"] = results.analyzers._Return.get_analysis()["rnorm"] * 252 * 240  # 1min data
-    analysers["Rets/Drawdown"] = analysers["A_Rets"] / analysers["Max_Drawdown"]
 
     return analysers
 
 
-# opt_results = [get_my_analysis(i[0]) for i in results]
+# %%
+# opt_results = [opt_analysis(i[0]) for i in results]
 # opt_df = pd.DataFrame(opt_results)
 # opt_df.to_csv('5m_p10_20w5_15.csv')
 
@@ -507,13 +528,36 @@ def get_my_analysis(results):
 
 # plt.show()
 
+# %%
+output_df = pd.read_csv('results.csv', index_col='datetime')
+std = output_df['timereturn'].std()
+ann_std = std * math.sqrt(270 * 252)
 
+
+# %%
+# 累计收益率和最大回撤
 rets = pd.Series(strats.analyzers._TimeReturn.get_analysis())
-cumrets = (rets + 1).cumprod()
-# cumrets = rets.cumsum()
+cumrets = emp.cum_returns(rets, starting_value=1.0)
 maxrets = cumrets.cummax()
 drawdown = (cumrets - maxrets) / maxrets
+max_drawdown = emp.max_drawdown(rets)
+calmar_ratio = emp.calmar_ratio(rets)
 
+# 夏普比率
+num_years = var.todate.year - var.fromdate.year + 1
+end_cash = cerebro.broker.get_value()
+# ann_rets = (end_cash / var.startcash - 1) / num_years
+ann_rets = cumrets[-1] ** (1 / num_years) - 1
+yearly_trade_times = int(rets.shape[0] / num_years)
+# ann_rets = emp.annual_return(rets, annualization=yearly_trade_times)
+# ann_std = emp.annual_volatility(rets, annualization=yearly_trade_times)
+risk_free = 0.00
+sharpe = (ann_rets - risk_free) / ann_std
+# sharpe = emp.sharpe_ratio(rets, risk_free=risk_free, annualization=yearly_trade_times)
+
+# 盈亏比
+mean_per_win = (rets[rets > 0]).mean()
+mean_per_loss = (rets[rets < 0]).mean()
 
 annual_rets = pd.Series(strats.analyzers._Return.get_analysis())
 # annual_rets = pd.Series(strats.analyzers._TimeReturn.get_analysis()).mean() * 252 * 240
@@ -522,110 +566,89 @@ dd = strats.analyzers._TimeDrawDown.get_analysis()["maxdrawdown"]
 day_ret_max = pd.Series(strats.analyzers._TimeReturn.get_analysis()).describe()["max"]
 day_ret_min = pd.Series(strats.analyzers._TimeReturn.get_analysis()).describe()["min"]
 calmar = strats.analyzers._CalmarRatio.get_analysis()
+# sharpe_ratio = results[0].analyzers._Sharpe.get_analysis()['sharperatio']
 
 results_dict = {
-    "年化夏普比率": annual_sharpe,
-    "最大回撤": dd * -1 / 100,
+    "年化夏普比率": sharpe,
+    "最大回撤": max_drawdown, 
     "累计收益率": cumrets[-1],
     "年化收益率": annual_rets["rnorm"],
-    "收益回撤比": annual_rets["rnorm"] / (dd / 100),
+    "收益回撤比": annual_rets["rnorm"] / -max_drawdown,
     "单日最大收益": day_ret_max,
     "单日最大亏损": day_ret_min,
     "交易次数": int(rets.shape[0]),
     "获胜次数": int(sum(rets > 0)),
-    "胜率": sum(rets > 0) / rets.shape[0],
-    "盈亏比": None,
+    "盈亏比": abs(mean_per_win / mean_per_loss),
 }
 
 results_df = pd.Series(results_dict)
 print(results_df)
 
-# print(f"年化夏普比率: {annual_sharpe:.2f}")
-# print(f"最大回撤: {dd * -1 / 100:.2%}")
-# print(f"累计收益率: {cumrets[-1]:.2%}")
-# print(f"年化收益率: {annual_rets['rnorm']:.2%}")
-# print(f"收益回撤比: {annual_rets['rnorm'] / (dd / 100):.2f}")
-# print(f"单日最大收益: {day_ret_max:.2%}")
-# print(f"单日最大亏损: {day_ret_min:.2%}")
-# print(f"交易次数: {rets.shape[0]}")
-# print(f"获胜次数: {sum(rets > 0)}")
-# print(f"胜率: {sum(rets > 0) / rets.shape[0]:.2%}")
-
-
-# Preset
-# plt.style.reload_library()
-plt.style.use("ggplot")
-
-# Data input
-plot_df = pd.read_csv("results.csv", index_col="datetime")
-plot_df.index = pd.to_datetime(plot_df.index, errors="coerce").to_pydatetime()
-
-plot_df["drawdown"] *= -1 / 100
-
-
+# %%
 # Line plot of timereturn
-fig, ax1 = plt.subplots(figsize=(12, 8))
-ax1 = cumrets.plot(rot=45, grid=False, label="Cum Returns(Left)", color="brown", linewidth=3)
+fig, ax1 = plt.subplots(figsize=(12, 8), constrained_layout=True)
+ax1 = cumrets.plot(
+        rot=45, grid=False, label='累计收益率',
+        color='brown', linewidth=3
+        )
 
 ax2 = ax1.twinx()
-# ax2 = drawdown.plot.area(grid=False, label='Drawdown(Right)', alpha=0.5, color='tab:blue', linewidth=3)
-ax2 = plot_df["drawdown"].plot.area(grid=False, label="Drawdown(Right)", alpha=0.5, color="tab:blue")
+ax2 = drawdown.plot.area(
+        grid=False, label='回撤情况',
+        alpha=0.5, color='tab:blue', linewidth=2
+        )
 
-# ax1.set_ylim(0.0, 1.40)
 ax1.yaxis.set_ticks_position("left")
 ax2.yaxis.set_ticks_position("right")
-
-ax1.set_xlabel("Date")
+ax1.set_ylabel('累计收益率')
 
 h1, l1 = ax1.get_legend_handles_labels()
 h2, l2 = ax2.get_legend_handles_labels()
 plt.legend(h1 + h2, l1 + l2, fontsize=12, ncol=1, loc="upper right")
 plt.margins(x=0)
-fig.tight_layout()
+plt.title(f'{var.contract}累计收益率和回撤情况')
+# fig.tight_layout()
 
 # ax1.set_title('累计收益率曲线')
-
+plt.savefig('./images/rets_dd.png')
 plt.show()
 
+# %%
+# 累计收益率/标的价格走势
+contract_df = pd.read_csv(f"1m_main_contracts/{var.contract}.csv", index_col="TRADE_DT")
+contract_df.index = pd.to_datetime(contract_df.index)
 
-# Line plot of rets/prices
-fig, ax1 = plt.subplots(figsize=(12, 8))
+fig, ax1 = plt.subplots(figsize=(12, 8), constrained_layout=True)
 
-ax1.set_xlabel("Date")
-ax1.set_ylabel("Cum Returns")
-cumrets.plot(ax=ax1, grid=False, rot=45, label="Cum Returns(left)", color="brown", linewidth=3)
-ax1.tick_params(axis="y")
+# ax1.set_xlabel("")
+ax1.set_ylabel("累计收益率")
+cumrets.plot(ax=ax1, grid=False, rot=45, linewidth=3, label="累计收益率", color="brown")
 
 ax2 = ax1.twinx()
-ax2.set_ylabel("Price")
-df["S_DQ_ADJCLOSE"].loc[var.fromdate : var.todate].plot(
-    ax=ax2, color="tab:blue", linewidth=3, grid=False, label=var.contract + "(right)"
+# ax2.set_ylabel("价格")
+contract_df["S_DQ_CLOSE"].loc[var.fromdate:var.todate].plot(
+    ax=ax2, color="tab:blue", grid=False, label=f"{var.contract}", linewidth=3
 )
-# df["S_DQ_CLOSE"].loc[var.fromdate : var.todate].plot(
-#     ax=ax2, color="tab:blue", linewidth=3, grid=False, label=var.contract + "(right)"
-# )
-ax2.tick_params(axis="y")
 
 h1, l1 = ax1.get_legend_handles_labels()
 h2, l2 = ax2.get_legend_handles_labels()
 plt.legend(h1 + h2, l1 + l2, fontsize=12, ncol=1, loc="upper left")
-
+plt.title(f'{var.contract}累计收益率和价格曲线')
 plt.margins(x=0)
-fig.tight_layout()
+plt.savefig('./images/rets_prices.png')
 plt.show()
 
-
+# %%
 # 净值曲线
-net_value = plot_df["value"] / var.startcash - 1
 
-fig, ax = plt.subplots(figsize=(12, 8))
-ax.set_xlabel("Date")
-ax.set_ylabel("Net Value (¥)")
-ax = plt.plot(net_value, label="Net Value", color="brown", linewidth=3)
+# fig, ax = plt.subplots(figsize=(12, 8))
+# ax.set_xlabel("Date")
+# ax.set_ylabel("Net Value (¥)")
+# ax = plt.plot(net_value, label="Net Value", color="brown", linewidth=3)
 
 
-plt.margins(x=0)
-plt.grid(False)
-plt.legend(loc="upper left", fontsize=12)
-fig.tight_layout()
-plt.show()
+# plt.margins(x=0)
+# plt.grid(False)
+# plt.legend(loc="upper left", fontsize=12)
+# fig.tight_layout()
+# plt.show()
