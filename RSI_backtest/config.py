@@ -86,10 +86,10 @@ class Contract:
         return mult
 
 
-contract_name = 'IF00'
-fromdate = datetime.date(2015, 6, 16)
-todate = datetime.date(2017, 4, 16)
+contract_name = 'IH00'
+fromdate = datetime.date(2015, 4, 16)
+# todate = datetime.date(2017, 4, 16)
 
 def set_contract_var():
-    return Contract(contract_name, fromdate, todate)
+    return Contract(contract_name, fromdate=fromdate, todate=None)  # None for the limit of the timeframe 
 

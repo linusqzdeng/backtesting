@@ -50,6 +50,8 @@ class Factory:
         self.cumrets = emp.cum_returns(self.timereturn['timereturn'], starting_value=1.0)
         maxrets = self.cumrets.cummax()
         self.drawdown = (self.cumrets - maxrets) / maxrets
+
+        self.ann_mdd, self.calmar = self.cal_annual_mdd_calmar(self.detailed_rets)
         
         self.prices_df = self.normalise_prices(self.timereturn, prices_df)
 
@@ -89,7 +91,7 @@ class Factory:
 
         Returns
         -------
-        ann_rets: Annually timereturn dataframe
+        ann_rets: Annual timereturn dataframe
         ann_mean: Mean value of the annual return
         """
         years = df['year'].unique()
@@ -104,6 +106,34 @@ class Factory:
         ann_mean = ann_rets.mean()
         
         return ann_rets, ann_mean
+
+    def cal_annual_mdd_calmar(self, df):
+        """
+        Calculate the maximum drawdown and calmar ratio
+        for each year's return
+
+        Params
+        ------
+        df: Timereturn dataframe in minutes basis
+
+        Returns
+        -------
+        ann_mdd: Annual maximum drawdown level
+        ann_calmar: Annual calmar raito
+        """
+        years = df['year'].unique()
+        ann_mdd = {} 
+        ann_calmar = {}
+
+        for year in years:
+            year_rets = df[df['year'] == year]['timereturn']
+            ann_mdd[year] = emp.max_drawdown(year_rets)
+            ann_calmar[year] = emp.calmar_ratio(year_rets)
+
+        ann_mdd = pd.Series(ann_mdd)
+        ann_calmar = pd.Series(ann_calmar)
+
+        return ann_mdd, ann_calmar
     
     def cal_monthly_rets(self, df):
         """
@@ -130,50 +160,78 @@ class Factory:
                 scaled_rets = month_df['mean'] * month_df['count']
                 monthly_rets.loc[month,year] = scaled_rets
 
-        monthly_rets = monthly_rets.astype(float).T  # convert the df to horizontal basis
+        monthly_rets = monthly_rets.astype(float).T
         monthly_rets = monthly_rets.replace(np.nan, 0)
 
         return monthly_rets
         
-    def plot_ann_rets_bar(self, ann_rets, ann_mean):
+    def plot_annrets_mdd_calmar(self, ann_rets, ann_mean, ann_mdd, ann_calmar):
         """
-        Plot the annual return bar chart
+        Create a combination of bar chart and line chart that
+        illustrate the annual return, max drawdown and calmar
+        ratio for each year backtesting
         
         Params
         ------
         ann_rets: Timereturn dataframe in annual basis
         ann_mean: Mean return across the timeframe
+        ann_mdd: Annual maximum drawdown
+        ann_calmar: Annual calmar ratio
 
         Returns
         -------
         bar chart for annual returns
         """
-        fig, ax = plt.subplots(figsize=self.params['figsize'])
-        ax = sns.barplot(
+        fig, ax1 = plt.subplots(figsize=self.params['figsize'])
+        ax1 = sns.barplot(
+            x=ann_mdd.index, y=ann_mdd.values,
+            color='brown', capsize=0.3, label='最大回撤'
+        )
+
+        ax2 = ax1.twinx()
+        ax2.plot(
+                ax1.get_xticks(), ann_calmar.values,
+                color='tab:green', label='收益回撤比',
+                marker='o', linewidth=3
+                )
+        
+        ax3 = ax3 = sns.barplot(
             x=ann_rets.index, y=ann_rets.values,
-            color='tab:blue', capsize=0.3
+            color='tab:blue', capsize=0.3,
+            ax=ax1, label='年化收益率'
         )
 
         # average line
-        ax.axhline(ann_mean, alpha=0.4, linewidth=4,
-                   dashes=(5, 2), color='brown', label=f'平均值 {ann_mean:.2%}')
-        h, l = ax.get_legend_handles_labels()
-
+        ax3.axhline(ann_mean, alpha=0.8, linewidth=4,
+                   dashes=(5, 2), color='black', label=f'平均值 {ann_mean:.2%}')
+        
         # solid line in the x axis
-        ax.axhline(0, color='black')
-
+        ax3.axhline(0, color='black')
+        
         # set axis labels
-        ax.set_xlabel('年份')
-        ax.set_ylabel('收益率')
+        ax1.set_xlabel('年份')
+        ax1.set_ylabel('最大回撤')
+        ax2.set_ylabel('收益回撤比')
+        ax3.set_ylabel('收益率')
+        
+        # set yaxis position
+        # ax1.yaxis.set_ticks_position('none')
+        # ax2.yaxis.set_ticks_position('none')
+        # ax3.yaxis.set_ticks_position('none')
+
+        h1, l1 = ax1.get_legend_handles_labels()
+        h2, l2 = ax2.get_legend_handles_labels()
+        h3, l3 = ax3.get_legend_handles_labels()
 
         # format y axis to percentage style
-        ax.yaxis.set_major_formatter(mticker.PercentFormatter(1.0))
+        ax1.yaxis.set_major_formatter(mticker.PercentFormatter(1.0))
 
-        plt.legend(h, l, fontsize=12, loc='upper right')
+        plt.legend(h1 + h2, l1 + l2, fontsize=12, loc='upper right')
+        # plt.legend(h1, l1, fontsize=12, loc='upper right')
         plt.title('年化收益率', fontsize=14)
         fig.tight_layout()
 
-        plt.savefig('./images/ann_rets.png')
+        plt.savefig(f'./images/{metavar.contract}rets_mdd_calmar.png')
         plt.show()
 
     def plot_month_rets_heatmap(self, monthly_rets):
@@ -207,7 +265,7 @@ class Factory:
         plt.title('月度收益率', fontsize=14)
         fig.tight_layout()
 
-        plt.savefig('./images/month_rets_heatmap.png')
+        plt.savefig(f'./images/{metavar.contract}month_rets_heatmap.png')
         plt.show()
 
     def plot_cumrets_dd_prices(self, cumrets, dd, prices):
@@ -228,21 +286,21 @@ class Factory:
         fig, ax1 = plt.subplots(figsize=self.params['figsize'])
         
         # cumulative returns
-        cumrets.plot(ax=ax1, rot=45, grid=False, label="累计收益率", color="brown", linewidth=3)
+        cumrets.plot(ax=ax1, rot=45, grid=False, label="净值曲线", color="brown", linewidth=2)
 
         # drawdown and prices
         ax2 = ax1.twinx()
-        ax2 = dd.plot.area(grid=False, label="回撤情况", alpha=0.4, color="tab:blue", linewidth=2)
+        ax2 = dd.plot.area(grid=False, label="回撤情况", alpha=0.3, color="tab:blue", linewidth=1)
 
         ax3 = ax1.twinx()
         prices.plot(
                 ax=ax3, grid=False, label='价格曲线',
-                alpha=0.3, color='grey', linewidth=3,
+                alpha=0.4, color='grey', linewidth=2,
                 )
         ax3.spines['right'].set_position(('outward', 60))  # outer axis
 
         ax1.set_xlabel("日期")
-        ax1.set_ylabel("累计收益率")
+        ax1.set_ylabel("净值")
         # ax2.set_ylabel('回撤情况')
         # ax3.set_ylabel('价格曲线')
 
@@ -257,7 +315,7 @@ class Factory:
         plt.margins(x=0)
         fig.tight_layout()
 
-        plt.savefig('./images/rets_dd_prices.png')
+        plt.savefig(f'./images/{metavar.contract}rets_dd_prices.png')
         plt.show()
 
 
@@ -277,8 +335,11 @@ if __name__ == '__main__':
     ann_rets, ann_mean = ind.ann_rets, ind.ann_mean
     monthly_rets = ind.month_rets
 
+    # calculate annually max_drawdown and calmar ratio
+    ann_mdd, ann_calmar = ind.ann_mdd, ind.calmar
+
     # plot the bar chart and heatmap
-    ind.plot_ann_rets_bar(ann_rets, ann_mean)
+    ind.plot_annrets_mdd_calmar(ann_rets, ann_mean, ann_mdd, ann_calmar)
     ind.plot_month_rets_heatmap(monthly_rets)
     ind.plot_cumrets_dd_prices(ind.cumrets, ind.drawdown, ind.prices_df)
 
