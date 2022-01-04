@@ -13,6 +13,7 @@ from ast import literal_eval
 
 metavar = config.set_contract_var()
 
+
 class Logger:
     """将输出内容保存到本地文件"""
 
@@ -97,7 +98,8 @@ class FurSizer(bt.Sizer):
         # size = self.p.adj_func * self.p.theta * self.p.fund // (k_std * price_change * self.p.mult) if price_change != 0 else 0
 
         tr = [
-            max(data.high[0], data.close[-i]) - min(data.low[0], data.close[-i]) for i in range(1, self.p.period + 1)
+            max(data.high[0], data.close[-i]) - min(data.low[0], data.close[-i])
+            for i in range(1, self.p.period + 1)
         ]  # true range
         atr = sum(tr) / self.p.period  # 真实波动幅度
         size = self.p.adj_func * self.p.theta * self.p.fund // (atr * self.p.mult)
@@ -123,10 +125,6 @@ class EnhancedRSI(bt.Strategy):
         self.dataclose = self.datas[0].close
         self.dataopen = self.datas[0].open
         self.datadatetime = self.datas[0].datetime
-
-        # 交易时间表
-        filepath = os.path.join(os.curdir, "trading_time", "IF00_time.csv")
-        self.time_df = pd.read_csv(filepath, index_col="date")
 
         # 设置指标
         self.rsi_s = bt.ind.RSI_SMA(self.datas[0], period=self.p.period, safediv=True)
@@ -165,10 +163,10 @@ class EnhancedRSI(bt.Strategy):
 
         # 跳过当前交易的条件
         bypass_conds = [
-                    self.order,
-                    # now == self.ordermin,
-                    today == metavar._fromdate  # 跳过第一天
-                    ]
+            self.order,
+            # now == self.ordermin,
+            today == metavar._fromdate,  # 跳过第一天
+        ]
         if any(bypass_conds):
             return
 
@@ -216,7 +214,12 @@ class EnhancedRSI(bt.Strategy):
 
         # 处理已完成订单
         if order.status == order.Completed:
-            margin_used = order.executed.price * abs(order.executed.size) * metavar.mult * metavar.margin
+            margin_used = (
+                order.executed.price
+                * abs(order.executed.size)
+                * metavar.mult
+                * metavar.margin
+            )
             # self.ordermin = bt.num2time(self.datadatetime[0]).isoformat()
 
             if order.isbuy():
@@ -235,7 +238,9 @@ class EnhancedRSI(bt.Strategy):
 
         # 处理问题清单
         elif order.status in [order.Canceled, order.Margin, order.Rejected]:
-            self.log(f"ORDER CANCELED/MARGIN/REJECTED **CODE**: {order.getstatusname()}")
+            self.log(
+                f"ORDER CANCELED/MARGIN/REJECTED **CODE**: {order.getstatusname()}"
+            )
 
         # Write down if no pending order
         self.order = None
@@ -244,7 +249,9 @@ class EnhancedRSI(bt.Strategy):
         if not trade.isclosed:
             return
         self.bar_traded = len(self)
-        self.log(f"OPERATION PROFIT {trade.pnl:.2f}, NET PROFIT {trade.pnlcomm:.2f}, TRADE AT BAR {self.bar_traded}")
+        self.log(
+            f"OPERATION PROFIT {trade.pnl:.2f}, NET PROFIT {trade.pnlcomm:.2f}, TRADE AT BAR {self.bar_traded}"
+        )
 
     def get_tradetime(self, today) -> list:
         """获取当日所有交易时间点"""
@@ -289,7 +296,7 @@ def data_cleansing(filepath):
     return short_df, long_df
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     # 保存回测交易单到本地
     sys.stdout = Logger()
 
@@ -315,7 +322,7 @@ if __name__ == '__main__':
     cerebro.addanalyzer(bt.analyzers.Returns, _name="_Return")
     cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name="_Sharpe")
     cerebro.addanalyzer(bt.analyzers.SharpeRatio_A, _name="_AnnualSharpe")
-    cerebro.addanalyzer(bt.analyzers.Returns, _name="_AnnualReturn")  # Annualisation
+    cerebro.addanalyzer(bt.analyzers.Returns, _name="_AnnualReturn")
 
     # Add observers
     cerebro.addobserver(bt.observers.Broker)
@@ -356,7 +363,7 @@ if __name__ == '__main__':
     rets = pd.Series(strats.analyzers._TimeReturn.get_analysis())
 
     # =========== for analysis.py ============ #
-    rets.to_csv('timereturn.csv', index=True)
+    rets.to_csv("timereturn.csv", index=True)
     # ======================================== #
 
     cumrets = emp.cum_returns(rets, starting_value=0)
@@ -368,18 +375,15 @@ if __name__ == '__main__':
     # 夏普比率
     num_years = metavar._todate.year - metavar._fromdate.year
     yearly_trade_times = rets.shape[0] / num_years
-    # ann_rets = cumrets[-1] ** (1 / num_years) - 1
     ann_rets = (1 + cumrets[-1]) ** (1 / num_years) - 1
-    ann_std = emp.annual_volatility(rets)
     risk_free = 0
-    sharpe = emp.sharpe_ratio(rets, risk_free=risk_free, annualization=yearly_trade_times)
+    sharpe = emp.sharpe_ratio(rets, risk_free=risk_free, annualization=yearly_trade_times)  # 4.5h 交易时间
 
     # 盈亏比
     mean_per_win = (rets[rets > 0]).mean()
     mean_per_loss = (rets[rets < 0]).mean()
 
-    annual_rets = pd.Series(strats.analyzers._Return.get_analysis())
-    annual_sharpe = strats.analyzers._Sharpe.get_analysis()["sharperatio"]
+    # 单次交易最大最小值
     day_ret_max = rets.max()
     day_ret_min = rets.min()
 
@@ -388,7 +392,7 @@ if __name__ == '__main__':
         "最大回撤": max_drawdown,
         "累计收益率": cumrets[-1],
         "年化收益率": ann_rets,
-        "收益回撤比": ann_rets / -max_drawdown, 
+        "收益回撤比": ann_rets / -max_drawdown,
         "单日最大收益": day_ret_max,
         "单日最大亏损": day_ret_min,
         "交易次数": round(rets.shape[0], 0),

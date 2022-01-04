@@ -14,12 +14,17 @@ import math
 import csv
 import os, sys
 
+import config
 from ast import literal_eval
+
+
+var = config.set_contract_var()
 
 # Matplotlib init
 plt.style.use("ggplot")
 plt.rcParams["axes.unicode_minus"] = False
 plt.rcParams["font.family"] = ["Heiti TC"]  # Or any other Chinese characters
+
 
 class Logger:
     """将输出内容保存到本地文件"""
@@ -34,57 +39,6 @@ class Logger:
 
     def flush(self):
         pass
-
-
-class MetaVar:
-
-    valid_contracts = ["IF00", "IH00", "IC00"]
-
-    def __init__(self, contract: str):
-        # 合约设置
-        if contract in self.valid_contracts:
-            self.contract = contract
-        else:
-            print("Invalid contract name...")
-
-        # 回测区间设置
-        self.fromdate = datetime.datetime(2019, 4, 16)
-        self.todate = datetime.datetime(2021, 12, 21)
-
-        # 回测周期设置  ==待优化==
-        self.period = 15
-        self.window = 10
-
-        # 交易时间表
-        # filepath = os.path.join(os.curdir, 'trading_time', self.contract + '_time.csv')  # 5min data
-        filepath = os.path.join(os.path.abspath("."), "trading_time", self.contract + "_1mtime.csv")  # 1min data
-        self.time_df = pd.read_csv(filepath, index_col="date")
-
-        # 初始资金设置
-        self.startcash = 100_000_000
-
-        # 交易手续费设置
-        self.closeout_type = 1  # 1代表平今仓，0代表止盈止损平仓
-
-        # 保证金设置
-        if self.contract in ["IH00", "IC00"]:
-            self.margin = 0.10
-        elif self.contract == "IF00":
-            self.margin = 0.12
-
-        # 乘数设置
-        if self.contract in ["IF00", "IH00"]:
-            self.mult = 300.0
-        elif self.contract == "IC00":
-            self.mult = 200.0
-
-        # 滑点设置
-
-        # 印花税设置
-        self.stamp_duty = 0.001
-
-
-var = MetaVar("IC00")
 
 
 class CumNoise(bt.Strategy):
@@ -387,8 +341,8 @@ class ValueSizer(bt.Sizer):
 
 class InputData(bt.feeds.PandasData):
     params = dict(
-        fromdate=var.fromdate,
-        todate=var.todate,
+        fromdate=var._fromdate,
+        todate=var._todate,
         nullvalue=np.nan,
         datetime=None,  # index of the data
         open=0,
@@ -399,256 +353,112 @@ class InputData(bt.feeds.PandasData):
         openinterest=-1,
     )
 
-
-class IndPlot:
-    def __init__(self, results):
-        self.df = results
         
 
+if __name__ == "__main__":
+    # 将打印内容保存到本地
+    sys.stdout = Logger()
 
-# 将打印内容保存到本地
-sys.stdout = Logger()
+    # 数据预处理
+    cols = [
+        "S_DQ_ADJOPEN",
+        "S_DQ_ADJHIGH",
+        "S_DQ_ADJLOW",
+        "S_DQ_ADJCLOSE",
+        "S_DQ_VOLUME",
+    ]
 
-# 数据预处理
-cols = [
-    "S_DQ_ADJOPEN",
-    "S_DQ_ADJHIGH",
-    "S_DQ_ADJLOW",
-    "S_DQ_ADJCLOSE",
-    "S_DQ_VOLUME",
-]
-# cols = [
-#     "S_DQ_OPEN",
-#     "S_DQ_HIGH",
-#     "S_DQ_LOW",
-#     "S_DQ_CLOSE",
-#     "S_DQ_VOLUME",
-# ]  # 1min data
+    filename = var.contract + ".csv"
+    # filepath = os.path.join(os.path.curdir, '5m_main_contracts', filename)
+    filepath = os.path.join(os.path.curdir, "1m_main_contracts", filename)
+    df = pd.read_csv(filepath, index_col="TRADE_DT")
+    df = df[cols]
+    df.index = pd.to_datetime(df.index)
+    data = InputData(dataname=df)
 
-filename = var.contract + ".csv"
-# filepath = os.path.join(os.path.curdir, '5m_main_contracts', filename)
-filepath = os.path.join(os.path.curdir, "1m_main_contracts", filename)
-df = pd.read_csv(filepath, index_col="TRADE_DT")
-df = df[cols]
-df.index = pd.to_datetime(df.index)
-data = InputData(dataname=df)
+    cerebro = bt.Cerebro()
+    cerebro.addstrategy(CumNoise)
 
-cerebro = bt.Cerebro()
-cerebro.addstrategy(CumNoise)
+    cerebro.adddata(data)
+    # cerebro.broker.set_coc(True)  # cheat on close 以当日收盘价买入
+    comminfo = FurCommInfo()
+    cerebro.broker.addcommissioninfo(comminfo)
+    cerebro.broker.setcash(var.startcash)
+    # cerebro.addsizer(ATRSizer)
+    # cerebro.addsizer(bt.sizers.SizerFix, stake=1)
 
-# 参数优化
-# cerebro = bt.Cerebro(optdatas=True, optreturn=True)
-# cerebro.optstrategy(CumNoise, period=range(10, 25, 5), window=range(5, 20, 5))
+    # Analysers
+    cerebro.addanalyzer(bt.analyzers.TimeReturn, _name="_TimeReturn")
+    cerebro.addanalyzer(bt.analyzers.TimeDrawDown, _name="_TimeDrawDown")
+    cerebro.addanalyzer(bt.analyzers.DrawDown, _name="_DrawDown")
+    cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name="_Sharpe", timeframe=bt.TimeFrame.Minutes, annualize=True)
+    cerebro.addanalyzer(bt.analyzers.Returns, _name="_Return", timeframe=bt.TimeFrame.Minutes, tann=240*252)
+    cerebro.addanalyzer(bt.analyzers.Calmar, _name="_CalmarRatio")
 
-cerebro.adddata(data)
-# cerebro.broker.set_coc(True)  # cheat on close 以当日收盘价买入
-comminfo = FurCommInfo()
-cerebro.broker.addcommissioninfo(comminfo)
-cerebro.broker.setcash(var.startcash)
-# cerebro.addsizer(ATRSizer)
-# cerebro.addsizer(bt.sizers.SizerFix, stake=1)
+    # Observers
+    cerebro.addobserver(bt.observers.Broker)
+    cerebro.addobserver(bt.observers.Trades)
+    cerebro.addobserver(bt.observers.BuySell)
+    cerebro.addobserver(bt.observers.DrawDown)
+    cerebro.addobserver(bt.observers.TimeReturn)
 
-# Analysers
-cerebro.addanalyzer(bt.analyzers.TimeReturn, _name="_TimeReturn")
-cerebro.addanalyzer(bt.analyzers.TimeDrawDown, _name="_TimeDrawDown")
-cerebro.addanalyzer(bt.analyzers.DrawDown, _name="_DrawDown")
-cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name="_Sharpe", timeframe=bt.TimeFrame.Minutes, annualize=True)
-cerebro.addanalyzer(bt.analyzers.Returns, _name="_Return", timeframe=bt.TimeFrame.Minutes, tann=240*252)
-cerebro.addanalyzer(bt.analyzers.Calmar, _name="_CalmarRatio")
+    # 开始回测
+    init_msg = f"""
+            回测对象: {var.contract}
+            起始时间: {var._fromdate}
+            终止时间: {var._todate}
+            合约点值: {var.mult}
+            最低保证金: {var.margin}
+            开仓/平仓手续费: {0.23 / 10000:.4%}
+            平今仓手续费: {3.45 / 10000:.4%}
+            """
 
-# Observers
-cerebro.addobserver(bt.observers.Broker)
-cerebro.addobserver(bt.observers.Trades)
-cerebro.addobserver(bt.observers.BuySell)
-cerebro.addobserver(bt.observers.DrawDown)
-cerebro.addobserver(bt.observers.TimeReturn)
+    print(init_msg)
+    print(f"开始资金总额 {cerebro.broker.getvalue():.2f}")
+    # results = cerebro.run(maxcpus=1)
+    results = cerebro.run()
+    strats = results[0]
+    print(f"结束资金总额 {cerebro.broker.getvalue():.2f}")
 
-# 开始回测
-init_msg = f"""
-        回测对象: {var.contract}
-        起始时间: {var.fromdate.date()}
-        终止时间: {var.todate.date()}
-        合约点值: {var.mult}
-        最低保证金: {var.margin}
-        开仓/平仓手续费: {0.23 / 10000:.4%}
-        平今仓手续费: {3.45 / 10000:.4%}
-        """
+    # cerebro.plot()
 
-print(init_msg)
-print(f"开始资金总额 {cerebro.broker.getvalue():.2f}")
-# results = cerebro.run(maxcpus=1)
-results = cerebro.run()
-print(f"结束资金总额 {cerebro.broker.getvalue():.2f}")
+    # %%
+    # 累计收益率和最大回撤
+    rets = pd.Series(strats.analyzers._TimeReturn.get_analysis())
+    cumrets = emp.cum_returns(rets, starting_value=0)
+    maxrets = cumrets.cummax()
+    drawdown = (cumrets - maxrets) / maxrets
+    max_drawdown = emp.max_drawdown(rets)
+    calmar_ratio = emp.calmar_ratio(rets)
 
-# Results
-strats = results[0]
-
-
-# cerebro.plot()
-
-# %%
-def opt_analysis(results):
-    analysers = {}
-    # 返回参数
-    rets = pd.Series(results.analyzers._TimeReturn.get_analysis())
-    num_years = var.todate.year - var.fromdate.year
-    if num_years == 0:
-        num_years = 1
-    ann_rets = (cerebro.broker.get_value() / var.startcash - 1) / num_years
-    
     # 夏普比率
-    ann_std = emp.annual_volatility(rets)
-    risk_free = 0.01
-    
-    analysers['return'] = ann_rets
-    analysers['max_drawdown'] = emp.max_drawdown(rets)
-    analysers['calmar_ratio'] = emp.calmar_ratio(rets)
-    analysers['sharpe'] = (ann_rets - risk_free) / ann_std
-    analysers["period"] = results.params.period
-    analysers["window"] = results.params.window
+    num_years = var._todate.year - var._fromdate.year
+    ann_rets = (1 + cumrets[-1]) ** (1 / num_years) - 1
+    yearly_trade_times = rets.shape[0] / num_years
+    risk_free = 0.00
+    sharpe = emp.sharpe_ratio(rets, risk_free=risk_free, annualization=yearly_trade_times)
 
-    return analysers
+    # 盈亏比
+    mean_per_win = (rets[rets > 0]).mean()
+    mean_per_loss = (rets[rets < 0]).mean()
 
+    day_ret_max = pd.Series(strats.analyzers._TimeReturn.get_analysis()).describe()["max"]
+    day_ret_min = pd.Series(strats.analyzers._TimeReturn.get_analysis()).describe()["min"]
 
-# %%
-# opt_results = [opt_analysis(i[0]) for i in results]
-# opt_df = pd.DataFrame(opt_results)
-# opt_df.to_csv('5m_p10_20w5_15.csv')
+    results_dict = {
+        "年化夏普比率": sharpe,
+        "最大回撤": max_drawdown, 
+        "累计收益率": cumrets[-1],
+        "年化收益率": ann_rets, 
+        "收益回撤比": ann_rets / -max_drawdown,
+        "单日最大收益": day_ret_max,
+        "单日最大亏损": day_ret_min,
+        "交易次数": int(rets.shape[0]),
+        "获胜次数": sum(rets > 0),
+        "胜率": sum(rets > 0) / rets.shape[0],
+        "盈亏比": abs(mean_per_win / mean_per_loss),
+    }
 
-# opt_df
+    results_df = pd.Series(results_dict)
+    print(results_df)
 
-
-# palette = sns.color_palette('hls')
-# sns.set_palette(palette)
-# # plt.style.use('seaborn')
-
-# # fig, ax = plt.subplots(figsize=(8, 8))
-# heatmap_df = opt_df.pivot(index='period', columns='window', values='Rets/Drawdown')
-# sns.heatmap(heatmap_df)
-
-# plt.show()
-
-# %%
-output_df = pd.read_csv('results.csv', index_col='datetime')
-std = output_df['timereturn'].std()
-ann_std = std * math.sqrt(270 * 252)
-
-
-# %%
-# 累计收益率和最大回撤
-rets = pd.Series(strats.analyzers._TimeReturn.get_analysis())
-cumrets = emp.cum_returns(rets, starting_value=1.0)
-maxrets = cumrets.cummax()
-drawdown = (cumrets - maxrets) / maxrets
-max_drawdown = emp.max_drawdown(rets)
-calmar_ratio = emp.calmar_ratio(rets)
-
-# 夏普比率
-num_years = var.todate.year - var.fromdate.year + 1
-end_cash = cerebro.broker.get_value()
-# ann_rets = (end_cash / var.startcash - 1) / num_years
-ann_rets = cumrets[-1] ** (1 / num_years) - 1
-yearly_trade_times = int(rets.shape[0] / num_years)
-# ann_rets = emp.annual_return(rets, annualization=yearly_trade_times)
-# ann_std = emp.annual_volatility(rets, annualization=yearly_trade_times)
-risk_free = 0.00
-sharpe = (ann_rets - risk_free) / ann_std
-# sharpe = emp.sharpe_ratio(rets, risk_free=risk_free, annualization=yearly_trade_times)
-
-# 盈亏比
-mean_per_win = (rets[rets > 0]).mean()
-mean_per_loss = (rets[rets < 0]).mean()
-
-annual_rets = pd.Series(strats.analyzers._Return.get_analysis())
-# annual_rets = pd.Series(strats.analyzers._TimeReturn.get_analysis()).mean() * 252 * 240
-annual_sharpe = strats.analyzers._Sharpe.get_analysis()["sharperatio"]
-dd = strats.analyzers._TimeDrawDown.get_analysis()["maxdrawdown"]
-day_ret_max = pd.Series(strats.analyzers._TimeReturn.get_analysis()).describe()["max"]
-day_ret_min = pd.Series(strats.analyzers._TimeReturn.get_analysis()).describe()["min"]
-calmar = strats.analyzers._CalmarRatio.get_analysis()
-# sharpe_ratio = results[0].analyzers._Sharpe.get_analysis()['sharperatio']
-
-results_dict = {
-    "年化夏普比率": sharpe,
-    "最大回撤": max_drawdown, 
-    "累计收益率": cumrets[-1],
-    "年化收益率": annual_rets["rnorm"],
-    "收益回撤比": annual_rets["rnorm"] / -max_drawdown,
-    "单日最大收益": day_ret_max,
-    "单日最大亏损": day_ret_min,
-    "交易次数": int(rets.shape[0]),
-    "获胜次数": int(sum(rets > 0)),
-    "盈亏比": abs(mean_per_win / mean_per_loss),
-}
-
-results_df = pd.Series(results_dict)
-print(results_df)
-
-# %%
-# Line plot of timereturn
-fig, ax1 = plt.subplots(figsize=(12, 8), constrained_layout=True)
-ax1 = cumrets.plot(
-        rot=45, grid=False, label='累计收益率',
-        color='brown', linewidth=3
-        )
-
-ax2 = ax1.twinx()
-ax2 = drawdown.plot.area(
-        grid=False, label='回撤情况',
-        alpha=0.5, color='tab:blue', linewidth=2
-        )
-
-ax1.yaxis.set_ticks_position("left")
-ax2.yaxis.set_ticks_position("right")
-ax1.set_ylabel('累计收益率')
-
-h1, l1 = ax1.get_legend_handles_labels()
-h2, l2 = ax2.get_legend_handles_labels()
-plt.legend(h1 + h2, l1 + l2, fontsize=12, ncol=1, loc="upper right")
-plt.margins(x=0)
-plt.title(f'{var.contract}累计收益率和回撤情况')
-# fig.tight_layout()
-
-# ax1.set_title('累计收益率曲线')
-plt.savefig('./images/rets_dd.png')
-plt.show()
-
-# %%
-# 累计收益率/标的价格走势
-contract_df = pd.read_csv(f"1m_main_contracts/{var.contract}.csv", index_col="TRADE_DT")
-contract_df.index = pd.to_datetime(contract_df.index)
-
-fig, ax1 = plt.subplots(figsize=(12, 8), constrained_layout=True)
-
-# ax1.set_xlabel("")
-ax1.set_ylabel("累计收益率")
-cumrets.plot(ax=ax1, grid=False, rot=45, linewidth=3, label="累计收益率", color="brown")
-
-ax2 = ax1.twinx()
-# ax2.set_ylabel("价格")
-contract_df["S_DQ_CLOSE"].loc[var.fromdate:var.todate].plot(
-    ax=ax2, color="tab:blue", grid=False, label=f"{var.contract}", linewidth=3
-)
-
-h1, l1 = ax1.get_legend_handles_labels()
-h2, l2 = ax2.get_legend_handles_labels()
-plt.legend(h1 + h2, l1 + l2, fontsize=12, ncol=1, loc="upper left")
-plt.title(f'{var.contract}累计收益率和价格曲线')
-plt.margins(x=0)
-plt.savefig('./images/rets_prices.png')
-plt.show()
-
-# %%
-# 净值曲线
-
-# fig, ax = plt.subplots(figsize=(12, 8))
-# ax.set_xlabel("Date")
-# ax.set_ylabel("Net Value (¥)")
-# ax = plt.plot(net_value, label="Net Value", color="brown", linewidth=3)
-
-
-# plt.margins(x=0)
-# plt.grid(False)
-# plt.legend(loc="upper left", fontsize=12)
-# fig.tight_layout()
-# plt.show()

@@ -17,7 +17,7 @@ plt.rcParams["axes.unicode_minus"] = False  # display minus sign correctly
 plt.rcParams["font.family"] = ["Heiti TC"]  # for Chinese characters
 
 
-class Microscope:
+class Factory:
     # Reproduce intuitive plots for timeseries data analysis
 
     params = {
@@ -99,8 +99,6 @@ class Microscope:
 
         # scale the min returns to annual return
         for year in years:
-            # year_summary = df[df['year'] == year].describe()['timereturn']
-            # ann_rets[year] = year_summary['mean'] * year_summary['count']
             min_rets = df[df['year'] == year]['timereturn']
             ann_rets[year] = emp.cum_returns_final(min_rets, starting_value=1) - 1  # (1 + rets) ** (1 / num_year) - 1
 
@@ -225,6 +223,7 @@ class Microscope:
         ax1.yaxis.set_major_formatter(mticker.PercentFormatter(1.0))
 
         plt.legend(h1 + h2, l1 + l2, fontsize=12, loc='upper right')
+        # plt.legend(h1, l1, fontsize=12, loc='upper right')
         plt.title('年化收益率', fontsize=14)
         fig.tight_layout()
 
@@ -319,7 +318,7 @@ class Microscope:
 
 if __name__ == '__main__':
     rets_file = "./timereturn.csv"
-    prices_file = f"./5m_main_contracts/{metavar.contract}.csv"
+    prices_file = f"./1m_main_contracts/{metavar.contract}.csv"
 
     rets_df = pd.read_csv(rets_file)
     rets_df = rets_df.rename(columns={'Unnamed: 0': 'Date', '0': 'timereturn'})
@@ -327,7 +326,7 @@ if __name__ == '__main__':
     rets_df.index = pd.to_datetime(rets_df.index)
     prices_df = pd.read_csv(prices_file, index_col='TRADE_DT')
 
-    ind = Microscope(rets_df, prices_df)
+    ind = Factory(rets_df, prices_df)
     
     # calculate annually and monthly returns
     ann_rets, ann_mean = ind.ann_rets, ind.ann_mean
