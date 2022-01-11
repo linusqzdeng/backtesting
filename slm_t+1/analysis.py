@@ -325,12 +325,18 @@ class Microscope:
         and the sharpe ratio for different parameters
         """
         plt.style.use('seaborn')
+
+        fig, ax = plt.subplots(figsize=self.figsize)
         df.plot(
                 kind='bar', x='period', y=['return', 'sharpe', 'max_drawdown'],
-                figsize=self.figsize, rot=0, title='Performance for Different Lookback Period'
+                ax=ax, rot=0, title='Performance for Different Lookback Period'
                 )
 
+        ax.axhline(0, color='black', linewidth=0.2)
+
         plt.grid(False)
+        plt.savefig('./images/params_performance.png')
+        fig.tight_layout()
         plt.show()
 
 

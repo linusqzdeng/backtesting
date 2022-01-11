@@ -182,7 +182,6 @@ class MyStrats(bt.Strategy):
     
     params = (
         ("printout", True),
-        ("target_percent", 0.45),
         ("stop_limit", 0.01),
         ("theta", 0.01),
         ("mult", metavar.mult),
@@ -289,7 +288,7 @@ class MyStrats(bt.Strategy):
         if any(bypass_conds):
             return
 
-        now = self.datadatetime[0]
+        now = bt.num2date(self.datadatetime[0]).date()
         
         self.pat = np.array(
                 self.datapat.get(ago=0, size=self.p.lookback_period - 1),
@@ -316,30 +315,25 @@ class MyStrats(bt.Strategy):
 
         else:
             # 最后一个交易日平仓
-            if now == metavar.test_df.index[-2]:
+            if now == metavar.test_df.index[-2].date():
                 self.order = self.close()
+                self.order.addinfo(name='CLOSE OUT AT THE END')
+                return
 
-            # 已持仓信号方向不一致，平仓后建仓
             pct_change = self.dataclose[0] / self.dataclose[-1] - 1
             if self.position.size > 0:
-                if upsig:
-                    if pct_change <= -self.p.stop_limit:  # 触发止损，平仓后开多
+                if pct_change <= -self.p.stop_limit:
+                    if upsig:
                         self.order = self.order_target_size(target=target_size)
-                        # self.order.addinfo(name='CLOSE OUT DUE TO STOP LIMIT')
-                    else:  # 未触发止损，不操作
-                        pass
-                elif downsig:  # 平仓后开空
+                if downsig:
                     self.order = self.order_target_size(target=-target_size)
 
             else:
-                if upsig:  # 平仓后开多
-                    self.order = self.order_target_size(target=target_size)
-                elif downsig:
-                    if pct_change >= self.p.stop_limit:  # 触发止损，平仓后开空
+                if pct_change >= self.p.stop_limit:
+                    if downsig:
                         self.order = self.order_target_size(target=-target_size)
-                        # self.order.addinfo(name='CLOSE OUT DUE TO STOP LIMIT')
-                    else:  # 未触发止损，不操作
-                        pass
+                if upsig:
+                    self.order = self.order_target_size(target=target_size)
 
     def stop(self):
         pass
@@ -441,12 +435,12 @@ def run():
 
     # Initialisation
     # normal init
-    # cerebro = bt.Cerebro()
-    # cerebro.addstrategy(MyStrats)
+    cerebro = bt.Cerebro()
+    cerebro.addstrategy(MyStrats)
 
     # optimisation init
-    cerebro = bt.Cerebro(optdatas=True, optreturn=True)
-    cerebro.optstrategy(MyStrats, lookback_period=range(3, 9))
+    # cerebro = bt.Cerebro(optdatas=True, optreturn=True)
+    # cerebro.optstrategy(MyStrats, lookback_period=range(3, 9))
 
     data = DataInput(dataname=metavar.test_df)
     cerebro.adddata(data)
@@ -471,23 +465,21 @@ def run():
 
     # Backtesting
     print(f"开始资金总额 {cerebro.broker.getvalue():.2f}")
-    # normal run
-    # results = cerebro.run()
-    # opt run
-    results = cerebro.run(maxcpus=1)
+    results = cerebro.run()
+    # results = cerebro.run(maxcpus=1)
     print(f"结束资金总额 {cerebro.broker.getvalue():.2f}")
     
     # normal analysis
-    # strats = results[0]
-    # normal_analysis(strats)
+    strats = results[0]
+    normal_analysis(strats)
 
     # opt analysis
-    opt_analysis(results)
+    # opt_analysis(results)
 
 
 if __name__ == "__main__":
     run()
-    # print(MyStrats.train_pat)
+    # print(metavar.test_df.index)
 
 
 
