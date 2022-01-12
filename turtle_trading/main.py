@@ -24,14 +24,13 @@ class Config:
         self._todate = datetime.date(2020, 4, 15)
 
         # 标的合约
-        self.contract = self.valid_contracts[0]
-        self.freq = 'daily'  # daily or weekly
+        self.contract = self.valid_contracts[1]
 
         # 数据处理
         # filepath = os.path.join(os.path.abspath('..'), 'index.csv')
         filepath = os.path.join(os.path.abspath('..'), 'data.csv')
         raw_df = pd.read_csv(filepath, index_col='TRADE_DT')
-        self.df = self.create_df(raw_df, self.contract, self.freq)
+        self.df = self.create_df(raw_df, self.contract, 'daily')
 
         # # 交易参数
         self.mult = self.set_mult()
@@ -46,10 +45,6 @@ class Config:
         # 通道参数 S1
         self.longlen = 20
         self.shortlen = 10
-
-        # 改良止损参数
-        self.bigfloat = 4
-        self.drawback = 1
 
     def create_df(self, raw_df, contract, freq):
         """
@@ -67,10 +62,8 @@ class Config:
 
         df = df[adj_cols]
 
-        agg_dict = {'S_DQ_ADJOPEN': 'first',
-          'S_DQ_ADJHIGH': 'max',
-          'S_DQ_ADJLOW': 'min',
-          'S_DQ_ADJCLOSE': 'last'}
+        methods = ['first', 'max', 'min', 'last']
+        agg_dict = {col: method for col, method in zip(adj_cols, methods)}
 
         if freq == 'weekly':
             df = df.resample('W-MON').agg(agg_dict).dropna()
@@ -142,13 +135,10 @@ class TurtleSizer(bt.Sizer):
         ("period", 20),
         ("mult", metavar.mult),
         ("theta", 0.01),
-        ("addpos_unit", 0.5),
     )
 
     def _getsizing(self, comminfo, cash, data, isbuy):
         abs_vol = self.strategy.atr[0] * self.p.mult  # N * CN
-        if self.strategy.addpos:
-            abs_vol *= self.p.addpos_unit  # 0.5N * CN
         unit = self.broker.get_value() * self.p.theta // abs_vol  # 1 unit
         
         return unit
@@ -172,10 +162,7 @@ class FurCommInfo(bt.CommInfoBase):
         """
         手续费=买卖手数*合约价格*手续费比例*合约乘数
         """
-        if size > 0:
-            return abs(size) * price * self.p.commission * self.p.mult
-        else:  # 卖出时考虑印花税
-            return abs(size) * price * (self.p.commission + self.p.stamp_duty) * self.p.mult
+        return abs(size) * price * self.p.commission * self.p.mult
 
     def get_margin(self, price):
         """每笔交易保证金=合约价格*合约乘数*保证金比例"""
@@ -198,18 +185,11 @@ class DonchianChannels(bt.Indicator):
     lines = (
         'long_m', 'long_h', 'long_l',
         'short_m', 'short_h', 'short_l',
-        ) 
+    ) 
     params = (
         ("longlen", metavar.longlen),
         ("shortlen", metavar.shortlen),
         ("lookback", -1),  # consider current bar or not
-        )
-
-    plotinfo = dict(subplot=False)  # plot along with data
-    plotlines = dict(
-        long_m=dict(ls='--'),  # dashed line
-        long_h=dict(_samecolor=True),  # use same color as prev line (dcm)
-        long_l=dict(_samecolor=True),  # use same color as prev line (dch)
     )
 
     def __init__(self):
@@ -234,10 +214,11 @@ class Turtle(bt.Strategy):
     params = (
         ("longlen", metavar.longlen),
         ("shortlen", metavar.shortlen),
-        ("bigfloat", metavar.bigfloat),
-        ("drawback", metavar.drawback),
-        ("addpos_percent", 0.02),
-        ("addpos_max", 4),
+        ("bigfloat", 6),
+        ("drawback", 1),
+        ("closeout", 2),
+        ("addpos_pct", 0.5),
+        ("max_add", 4),
     )
 
     def __init__(self):
@@ -255,17 +236,12 @@ class Turtle(bt.Strategy):
 
         # 头寸管理
         self.atr = bt.ind.ATR(data, period=self.p.longlen)
-        self.addpos = False  # 加仓
         self.addpos_count = 0
-        self.tight_closeout = False  # 紧缩型止损
 
+        self.curpos = 0
         self.buyprice = None
         self.sellprice = None
         self.order = None
-
-        self.trade_count = 0
-        self.win_count = 0
-        self.loss_count = 0
 
     def log(self, txt, dt=None):
         dt = dt or self.datadatetime.date(0)
@@ -274,7 +250,6 @@ class Turtle(bt.Strategy):
     def notify_order(self, order):
         # 不处理已提交或已接受的订单
         if order.status in [order.Submitted, order.Accepted]:
-            self.log(f"ORDER SUBMITTED/ACCEPTED **CODE** {order.getstatusname()}")
             return
 
         # 处理已完成订单
@@ -284,12 +259,20 @@ class Turtle(bt.Strategy):
 
             if order.isbuy():
                 self.log(
-                    "BUY EXECUTED @ {:.2f}, SIZE {:.2f}, COST {:.2f}, COMMISSION {:.2f}, MARGIN {:.2f}".format(
+                    "LONG DETECTED @ {:.2f}, HH {:.2f}, LL {:.2f}".format(
+                    order.created.price,
+                    self.long_h[0],
+                    self.long_l[0],
+                    )
+                )
+                self.log(
+                    "BUY EXECUTED @ {:.2f}, SIZE {}, COST {:.2f}, COMMISSION {:.2f}, MARGIN {:.2f}, CURPOS {}".format(
                     order.executed.price,
                     order.executed.size,
                     order.executed.value,
                     order.executed.comm,
                     margin_used,
+                    self.position.size,
                     )
                 )
 
@@ -297,12 +280,20 @@ class Turtle(bt.Strategy):
 
             elif order.issell():
                 self.log(
-                    "SELL EXECUTED @ {:.2f}, SIZE {:.2f}, COST {:.2f}, COMMISSION {:.2f}, MARGIN {:.2f}".format(
+                    "SHORT DETECTED @ {:.2f}, HH {:.2f}, LL {:.2f}".format(
+                    order.created.price,
+                    self.long_h[0],
+                    self.long_l[0],
+                    )
+                )
+                self.log(
+                    "SELL EXECUTED @ {:.2f}, SIZE {}, COST {:.2f}, COMMISSION {:.2f}, MARGIN {:.2f}, CURPOS {}".format(
                     order.executed.price,
                     order.executed.size,
                     order.executed.value,
                     order.executed.comm,
                     margin_used,
+                    self.position.size,
                     )
                 )
 
@@ -332,17 +323,13 @@ class Turtle(bt.Strategy):
         pass
 
     def next(self):
-        if self.order:
+        bypass_conds = [
+                self.order,
+                len(self) < metavar.longlen
+                ]
+        if any(bypass_conds):
             return
 
-        self.addpos = False
-        normal = 2 * self.atr[0]  # 普通平仓阈值
-        tight = self.p.drawback * self.atr[0]  # 大趋势紧缩平仓阈值
-
-        threhold = normal
-        if self.tight_closeout:
-            threshold = tight
-        
         # 建仓信号
         if not self.position:
             if self.dataclose[0] > self.long_h[0]:
@@ -354,56 +341,35 @@ class Turtle(bt.Strategy):
             # 平仓条件
             if self.position.size > 0:
                 price_change = self.dataclose[0] - self.buyprice
+
                 # 多头加仓
-                if (price_change / self.buyprice > self.p.addpos_percent)\
-                        and (self.addpos_count < self.p.addpos_max):
-                    self.addpos = True
+                if price_change >= self.p.addpos_pct * self.atr[0]\
+                        and (self.addpos_count < self.p.max_add):
                     self.order = self.buy()
                     self.order.addinfo(name='ADD LONG POSITION')
+                    self.addpos_count += 1
 
                 # 多头平仓
-                if price_change < -threhold:
+                if self.dataclose[0] < self.short_l:
                     self.order = self.close()
-
-                    if self.tight_closeout:
-                        self.order.addinfo(name='CLOSE OUT DUE TO STOP LIMIT (TIGHT)')
-                        self.tight_closeout = False
-
-                    self.order.addinfo(name='CLOSE OUT DUE TO STOP LIMIT')
+                    self.order.addinfo(name='CLOSE LONG DUE TO STOP LIMIT')
                     self.addpos_count = 0
-
-                # 触发大趋势止损
-                if price_change > self.p.bigfloat * self.atr[0]:
-                    self.tight_closeout = True
 
             else:
                 price_change = self.dataclose[0] - self.sellprice
+
                 # 空头加仓
-                if (price_change / self.sellprice < -self.p.addpos_percent)\
-                        and (self.addpos_count < self.p.addpos_max):
-                    self.addpos = True
+                if price_change <= -self.p.addpos_pct * self.atr[0]\
+                        and (self.addpos_count < self.p.max_add):
                     self.order = self.sell()
                     self.order.addinfo(name='ADD SHORT POSITION')
+                    self.addpos_count += 1
 
                 # 空头平仓
-                if price_change > threhold:
+                if self.dataclose[0] > self.short_h:
                     self.order = self.close()
-                    
-                    if self.tight_closeout:
-                        self.order.addinfo(name='CLOSE OUT DUE TO STOP LIMIT (TIGHT)')
-                        self.tight_closeout = False
-
-                    self.order.addinfo(name='CLOSE OUT DUE TO STOP LIMIT')
+                    self.order.addinfo(name='CLOSE SHORT DUE TO STOP LIMIT')
                     self.addpos_count = 0
-
-                # 触发大趋势止损
-                if price_change < -self.p.bigfloat * self.atr[0]:
-                    self.tight_closeout = True
-
-            # 记录加仓次数
-            if self.addpos:
-                self.addpos_count += 1
-
 
     def stop(self):
         pass
@@ -457,27 +423,24 @@ if __name__ == "__main__":
     maxrets = cumrets.cummax()
     drawdown = (cumrets - maxrets) / maxrets
     max_drawdown = emp.max_drawdown(rets)
-    calmar_ratio = emp.calmar_ratio(rets)
 
-    num_years = metavar._todate.year - metavar._fromdate.year
-    # ann_rets = (1 + cumrets[-1]) ** (1 / num_years) - 1
     ann_rets = emp.annual_return(rets, period='daily')
-    yearly_trade_times = rets.shape[0] / num_years
+    calmar_ratio = ann_rets / -max_drawdown
     sharpe = emp.sharpe_ratio(rets, risk_free=0, period='daily')
 
     # 盈亏比
     mean_per_win = (rets[rets > 0]).mean()
     mean_per_loss = (rets[rets < 0]).mean()
 
-    day_ret_max = pd.Series(strats.analyzers._TimeReturn.get_analysis()).describe()["max"]
-    day_ret_min = pd.Series(strats.analyzers._TimeReturn.get_analysis()).describe()["min"]
+    day_ret_max = rets.max()
+    day_ret_min = rets.min()
 
     results_dict = {
         "年化夏普比率": sharpe,
         "最大回撤": max_drawdown, 
         "累计收益率": cumrets[-1],
         "年化收益率": ann_rets, 
-        "收益回撤比": ann_rets / -max_drawdown,
+        "收益回撤比": calmar_ratio,
         "单日最大收益": day_ret_max,
         "单日最大亏损": day_ret_min,
         "交易次数": sum(rets != 0),
