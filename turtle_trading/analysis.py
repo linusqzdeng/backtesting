@@ -19,9 +19,7 @@ plt.rcParams["font.family"] = ["Heiti TC"]  # for Chinese characters
 class Microscope:
     # Reproduce intuitive plots for timeseries data analysis
 
-    params = {
-            'figsize': (12, 8)
-            }
+    figsize = (12, 8)
 
     def __init__(self, results_df: pd.DataFrame, prices_df: pd.DataFrame):
         """
@@ -54,7 +52,7 @@ class Microscope:
         
         self.prices_df = self.normalise_prices(self.timereturn, prices_df)
 
-    def normalise_prices(self, timereturn, prices_df):
+    def normalise_prices(self, timereturn, prices_df, starting_value=1):
         """
         Normalise the prices dataframe starting from 1 in order to
         compare the trend between prices and cumrets over the same timeframe
@@ -68,9 +66,13 @@ class Microscope:
         -------
         prices_df: Prices dataframe with the same timeframe
         """
-        prices_df.index = pd.to_datetime(prices_df.index)
         fromdate, todate = timereturn.index[0].date().isoformat(), timereturn.index[-1].date().isoformat()
         prices_df = prices_df.loc[fromdate:todate]['S_DQ_ADJCLOSE']
+        prices_df = (prices_df.pct_change().fillna(0) + 1).cumprod()
+        # prices_df = prices_df.apply(
+                # lambda x: (x - prices_df.min()) / (prices_df.max() - prices_df.min()
+                    # ) + starting_value
+                # )
 
         return prices_df
         
@@ -184,7 +186,7 @@ class Microscope:
         -------
         bar chart for annual returns
         """
-        fig, ax1 = plt.subplots(figsize=self.params['figsize'])
+        fig, ax1 = plt.subplots(figsize=self.figsize)
         ax1 = sns.barplot(
             x=ann_mdd.index, y=ann_mdd.values,
             color='brown', capsize=0.3, label='最大回撤'
@@ -218,7 +220,6 @@ class Microscope:
 
         h1, l1 = ax1.get_legend_handles_labels()
         h2, l2 = ax2.get_legend_handles_labels()
-        h3, l3 = ax3.get_legend_handles_labels()
 
         # format y axis to percentage style
         ax1.yaxis.set_major_formatter(mticker.PercentFormatter(1.0))
@@ -242,10 +243,10 @@ class Microscope:
         -------
         Heatmap of monthly return
         """
-        fig, ax = plt.subplots(figsize=self.params['figsize'])
+        fig, ax = plt.subplots(figsize=self.figsize)
         values = monthly_rets.values  # np.array of the monthly returns
 
-        ax = sns.heatmap(monthly_rets, cmap='RdBu', cbar=True)
+        ax = sns.heatmap(monthly_rets, cmap='Blues', cbar=True)
 
         # make sure the annot is in the center of the block
         # while also in a percentage format
@@ -279,35 +280,36 @@ class Microscope:
         -------
         Line graph of params trends over the timeframe 
         """
-        fig, ax1 = plt.subplots(figsize=self.params['figsize'])
+        fig, ax1 = plt.subplots(figsize=self.figsize, sharex=True)
         
         # cumulative returns
-        cumrets.plot(ax=ax1, rot=45, grid=False, label="净值曲线", color="brown", linewidth=2)
+        ax1 = cumrets.plot(rot=45, grid=False, label="净值曲线", color="brown", linewidth=2)
+        ax1 = prices.plot(
+                grid=False, label='价格曲线',
+                alpha=0.7, color='grey', linewidth=2,
+                )
+        # ax1 = plt.plot(data=cumrets, color='brown', label='净值曲线')
 
         # drawdown and prices
         ax2 = ax1.twinx()
         ax2 = dd.plot.area(grid=False, label="回撤情况", alpha=0.3, color="tab:blue", linewidth=1)
 
-        ax3 = ax1.twinx()
-        prices.plot(
-                ax=ax3, grid=False, label='价格曲线',
-                alpha=0.4, color='grey', linewidth=2,
-                )
-        ax3.spines['right'].set_position(('outward', 60))  # outer axis
+        ax1.yaxis.set_ticks_position("left")
+        ax2.yaxis.set_ticks_position("right")
+
+        # ax3 = ax1.twiny()
+        # ax3.spines['right'].set_position(('outward', 60))  # outer axis
 
         ax1.set_xlabel("日期")
         ax1.set_ylabel("净值")
         # ax2.set_ylabel('回撤情况')
         # ax3.set_ylabel('价格曲线')
 
-        ax1.yaxis.set_ticks_position("left")
-        ax2.yaxis.set_ticks_position("right")
-
         h1, l1 = ax1.get_legend_handles_labels()
         h2, l2 = ax2.get_legend_handles_labels()
-        h3, l3 = ax3.get_legend_handles_labels()
+        # h3, l3 = ax3.get_legend_handles_labels()
 
-        plt.legend(h1 + h2 + h3, l1 + l2 + l3, fontsize=12, ncol=1, loc="upper right")
+        plt.legend(h1 + h2, l1 + l2, fontsize=12, ncol=1, loc="upper right")
         plt.title(f"{metavar.contract}回测结果")
         plt.margins(x=0)
         fig.tight_layout()
