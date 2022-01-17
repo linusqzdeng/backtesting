@@ -7,9 +7,14 @@ import pandas as pd
 import numpy as np
 import backtrader as bt
 import empyrical as emp
+import pyfolio as pyf
 
 import datetime
 import os, sys
+import warnings
+from IPython.core.display import display
+
+warnings.filterwarnings('ignore')
 
 
 class Config:
@@ -31,8 +36,8 @@ class Config:
         filepath = os.path.join(os.path.abspath('..'), 'data.csv')
         raw_df = pd.read_csv(filepath, index_col='TRADE_DT', parse_dates=True)
         self.df = self.create_df(raw_df, self.contract, 'daily')
-        # self.firstday = self.get_firstday(self.df)  # keep records for the first day of the year
-        self.first_days = self.get_firstday(self.df)
+        self.first_days = self.get_firstday(self.df)  # keep records for the first day of the year
+
 
         # # 交易参数
         self.mult = self.set_mult()
@@ -338,16 +343,15 @@ class Turtle(bt.Strategy):
         pass
 
     def next(self):
-        bypass_conds = [self.order,
-                len(self) < metavar.longlen]
+        bypass_conds = [self.order, len(self) < metavar.longlen]
         if any(bypass_conds):
             return
 
         # record the net value at the beginnign of each year
-        metavar.brokervalue = self.broker.get_value()
-        today = self.datadatetime.date(0).isoformat()
-        if today in metavar.first_days:
-            metavar.yr_startcash = self.broker.get_value()
+        # metavar.brokervalue = self.broker.get_value()
+        # today = self.datadatetime.date(0).isoformat()
+        # if today in metavar.first_days:
+            # metavar.yr_startcash = self.broker.get_value()
 
         # 是否实行紧缩平仓
         # if self.is_trend():
@@ -483,9 +487,7 @@ def run():
 
     # Analysers
     cerebro.addanalyzer(bt.analyzers.TimeReturn, _name="_TimeReturn")
-    cerebro.addanalyzer(bt.analyzers.TimeDrawDown, _name="_TimeDrawDown")
-    cerebro.addanalyzer(bt.analyzers.DrawDown, _name="_DrawDown")
-    cerebro.addanalyzer(bt.analyzers.Calmar, _name="_CalmarRatio")
+    cerebro.addanalyzer(bt.analyzers.PyFolio, _name='pyfolio')
 
     # Backtesting
     init_msg = f"""
@@ -507,7 +509,7 @@ def run():
 
     # =========== for analysis.py ============ #
     rets = pd.Series(strats.analyzers._TimeReturn.get_analysis())
-    rets.to_csv("timereturn.csv", index=True)
+    rets.to_csv("./results/timereturn.csv", index=True)
     # ======================================== #
 
     cumrets = emp.cum_returns(rets, starting_value=0)
@@ -538,8 +540,22 @@ def run():
         "盈亏比": abs(mean_per_win / mean_per_loss),
     }
 
-    results_df = pd.Series(results_dict)
-    print(results_df)
+    print(pd.Series(results_dict))
+
+    pyfoliozer = strats.analyzers.getbyname('pyfolio')
+    returns, positions, transactions, gross_lev = pyfoliozer.get_pf_items()
+
+    perf_df = pyf.timeseries.perf_stats(
+            returns,
+            positions=positions,
+            transactions=transactions
+            )
+
+    returns.to_csv('./results/returns.csv')
+    positions.to_csv('./results/positions.csv')
+    transactions.to_csv('./results/transactions.csv')
+    gross_lev.to_csv('./results/gross_lev.csv')
+    perf_df.to_csv('./results/perf_df.csv')
 
 
 if __name__ == "__main__":

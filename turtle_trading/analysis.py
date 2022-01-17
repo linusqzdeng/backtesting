@@ -69,10 +69,6 @@ class Microscope:
         fromdate, todate = timereturn.index[0].date().isoformat(), timereturn.index[-1].date().isoformat()
         prices_df = prices_df.loc[fromdate:todate]['S_DQ_ADJCLOSE']
         prices_df = (prices_df.pct_change().fillna(0) + 1).cumprod()
-        # prices_df = prices_df.apply(
-                # lambda x: (x - prices_df.min()) / (prices_df.max() - prices_df.min()
-                    # ) + starting_value
-                # )
 
         return prices_df
         
@@ -319,7 +315,7 @@ class Microscope:
 
 
 if __name__ == '__main__':
-    rets_file = "./timereturn.csv"
+    rets_file = "./results/timereturn.csv"
 
     rets_df = pd.read_csv(rets_file)
     rets_df = rets_df.rename(columns={'Unnamed: 0': 'Date', '0': 'timereturn'})
