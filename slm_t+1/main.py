@@ -1,12 +1,13 @@
-# -*- coding: UTF-8 -*-
+# !/usr/bin/env/python3
+# -*- coding: UTF-8 -* -
 # Created on: 2022-01-10 10:44
 # Tested by: python 3.8.10
 # Author: @Qizhong Deng
 
-from empyrical.stats import max_drawdown
 import pandas as pd
 import numpy as np
 import backtrader as bt
+import pyfolio as pyf
 import empyrical as emp
 
 import os, sys
@@ -23,6 +24,13 @@ class Config:
             # parse_dates=True
             # )
 
+    # 三大指数
+    train_data = pd.read_csv(
+            os.path.abspath('../index.csv'),
+            index_col='TRADE_DT',
+            parse_dates=True
+            )
+
     # 股指期货主力合约
     raw_data = pd.read_csv(
             os.path.abspath('../data.csv'),
@@ -31,10 +39,11 @@ class Config:
             )
 
     contract = 'IF00'
-    train_fromdate = datetime.date(2010, 4, 16)
-    train_todate = datetime.date(2019, 12, 31)
-    fromdate = datetime.date(2020, 1, 1)
-    todate = datetime.date(2021, 12, 21)
+    benchmark = 300
+    train_fromdate = datetime.date(2004, 4, 16)
+    train_todate = datetime.date(2021, 12, 21)
+    fromdate = datetime.date(2010, 1, 1)
+    todate = datetime.date(2019, 12, 31)
 
     startcash = 10_000_000
 
@@ -45,25 +54,24 @@ class Config:
 
 
     def __init__(self):
-        # 历史数据始料库 1990/12/20 - 2015/9/11
-        # self.train_df = self.create_pattern(
-                # self.train_data, ref_col='close',
-                # fromdate=self.train_fromdate, todate=None
-                # )
+        # 历史数据始料库
+        self.train_data = self.train_data[self.train_data['S_INFO_CODE'] == self.benchmark]
+        self.train_df = self.create_pattern(
+                self.train_data, ref_col='S_DQ_CLOSE',
+                fromdate=None, todate=self.train_todate
+                )
 
-        # 采用IF00作为历史数据库
         self.resampled_data = self.resample_df(
                 self.cal_adjprices(self.raw_data, self.contract),
                 'daily'
                 )
         self.resampled_data = self.create_pattern(self.resampled_data, ref_col='S_DQ_ADJCLOSE')
-        self.train_df = self.resampled_data.loc[self.train_fromdate:self.train_todate]
         self.test_df = self.resampled_data.loc[self.fromdate:self.todate]
 
     def create_pattern(self, df: pd.DataFrame, ref_col: str, fromdate=None, todate=None):
         """Numerical pattern 1 for price goes down, 2 for price goes up"""
 
-        fromdate = fromdate or datetime.date(2010, 4, 16) 
+        fromdate = fromdate or datetime.date(2004, 4, 16) 
         todate =todate or datetime.date(2021, 12, 21) 
 
         df = df.loc[fromdate:todate]
@@ -185,7 +193,7 @@ class MyStrats(bt.Strategy):
         ("stop_limit", 0.01),
         ("theta", 0.01),
         ("mult", metavar.mult),
-        ("lookback_period", 3),
+        ("lookback_period", 6),
     )
 
     def __init__(self):
@@ -298,24 +306,26 @@ class MyStrats(bt.Strategy):
         up_pat = np.array2string(np.append(self.pat, 2), separator=',')
         down_pat = np.array2string(np.append(self.pat, 1), separator=',')
 
-        self.up_prob = self.train_pat[up_pat] / len(metavar.train_df)
-        self.down_prob = self.train_pat[down_pat] / len(metavar.train_df)
+        self.up_prob = self.train_pat[up_pat] / sum(self.train_pat)
+        self.down_prob = self.train_pat[down_pat] / sum(self.train_pat)
 
         upsig = self.up_prob >= self.down_prob
         downsig = self.up_prob < self.down_prob
 
-        target_size = self.cal_size()
+        target_size = self.cal_size()  # 基于ATR计算头寸
 
         if not self.position:
             # 未持仓，按信号建仓
             if upsig:
                 self.order = self.order_target_size(target=target_size)
+                self.order.addinfo(name='LONG POS CREATED')
             elif downsig:
                 self.order = self.order_target_size(target=-target_size)
+                self.order.addinfo(name='SHORT POS CREATED')
 
         else:
             # 最后一个交易日平仓
-            if now == metavar.test_df.index[-2].date():
+            if now == metavar.test_df.index[-2].date() and self.position:
                 self.order = self.close()
                 self.order.addinfo(name='CLOSE OUT AT THE END')
                 return
@@ -325,15 +335,28 @@ class MyStrats(bt.Strategy):
                 if pct_change <= -self.p.stop_limit:
                     if upsig:
                         self.order = self.order_target_size(target=target_size)
+
+                        if self.order is not None:  # target_size != curpos
+                            self.order.addinfo(name='CLOSEOUT AND REMAIN LONG')
+
                 if downsig:
                     self.order = self.order_target_size(target=-target_size)
+
+                    if self.order is not None:
+                        self.order.addinfo(name='CLOSEOUT AND CREATE SHORT')
 
             else:
                 if pct_change >= self.p.stop_limit:
                     if downsig:
                         self.order = self.order_target_size(target=-target_size)
+
+                        if self.order is not None:
+                            self.order.addinfo(name='CLOSEOUT AND REMAIN SHORT')
+
                 if upsig:
                     self.order = self.order_target_size(target=target_size)
+                    if self.order is not None:
+                        self.order.addinfo(name='CLOSEOUT AND CREATE LONG')
 
     def stop(self):
         pass
@@ -361,7 +384,7 @@ class MyStrats(bt.Strategy):
 def normal_analysis(strats):
     # =========== for analysis.py ============ #
     rets = pd.Series(strats.analyzers._TimeReturn.get_analysis())
-    rets.to_csv("timereturn.csv", index=True)
+    rets.to_csv("./results/timereturn.csv", index=True)
     # ======================================== #
     
     # 收益最大回撤
@@ -388,15 +411,31 @@ def normal_analysis(strats):
         "收益回撤比": ann_rets / -max_drawdown,
         "单日最大收益": day_ret_max,
         "单日最大亏损": day_ret_min,
-        "交易次数": round(len(rets), 0),
-        "获胜次数": round(sum(rets > 0), 0),
-        "胜率": sum(rets > 0) / len(rets),
+        "交易次数": sum(rets != 0),
+        "获胜次数": sum(rets > 0),
+        "胜率": sum(rets > 0) / sum(rets != 0),
         "盈亏比": abs(mean_per_win / mean_per_loss),
     }
 
     results_df = pd.Series(results_dict)
     results_df.to_clipboard()
     print(results_df)
+
+    pyfoliozer = strats.analyzers.getbyname('pyfolio')
+    returns, positions, transactions, gross_lev = pyfoliozer.get_pf_items()
+
+    perf_df = pyf.timeseries.perf_stats(
+            returns,
+            positions=positions,
+            transactions=transactions
+            )
+    print(perf_df)
+
+    returns.to_csv('./results/returns.csv')
+    positions.to_csv('./results/positions.csv')
+    transactions.to_csv('./results/transactions.csv')
+    gross_lev.to_csv('./results/gross_lev.csv')
+    perf_df.to_csv('./results/perf_df.csv')
 
 
 def opt_analysis(results):
@@ -409,10 +448,8 @@ def opt_analysis(results):
         rets = pd.Series(result.analyzers._TimeReturn.get_analysis())
         
         # 夏普比率
-        cumrets = emp.cum_returns(rets, starting_value=0)
         max_drawdown = emp.max_drawdown(rets)
         ann_rets = emp.annual_return(rets, period='daily')
-        # ann_rets = (1 + cumrets[-1]) ** (252 / len(rets)) - 1
         calmar = ann_rets / -max_drawdown
         sharpe = emp.sharpe_ratio(rets, risk_free=0, period='daily')
         
@@ -425,7 +462,7 @@ def opt_analysis(results):
 
     opt_results = [get_analysis(i[0]) for i in results]
     opt_df = pd.DataFrame(opt_results)
-    opt_df.to_csv('opt_results.csv')
+    opt_df.to_csv('./results/opt_results.csv')
 
     print(opt_df)
 
@@ -448,20 +485,12 @@ def run():
     comminfo = MyCommInfo()
     cerebro.broker.addcommissioninfo(comminfo)
     cerebro.broker.setcash(metavar.startcash)
+    cerebro.broker.set_coc(True)
     # cerebro.addsizer(MySizer)
 
     # Analysers
     cerebro.addanalyzer(bt.analyzers.TimeReturn, _name="_TimeReturn")
-    cerebro.addanalyzer(bt.analyzers.DrawDown, _name="_DrawDown")
-    cerebro.addanalyzer(bt.analyzers.TimeDrawDown, _name="_TimeDrawDown")
-    cerebro.addanalyzer(bt.analyzers.Calmar, _name="_CalmarRatio")
-
-    # Observers
-    cerebro.addobserver(bt.observers.Broker)
-    cerebro.addobserver(bt.observers.Trades)
-    cerebro.addobserver(bt.observers.BuySell)
-    cerebro.addobserver(bt.observers.DrawDown)
-    cerebro.addobserver(bt.observers.TimeReturn)
+    cerebro.addanalyzer(bt.analyzers.PyFolio, _name="pyfolio")
 
     # Backtesting
     print(f"开始资金总额 {cerebro.broker.getvalue():.2f}")
@@ -479,13 +508,7 @@ def run():
 
 if __name__ == "__main__":
     run()
-    # print(metavar.test_df.index)
-
-
-
-
-
-
+    # print(metavar.train_data)
 
 
 

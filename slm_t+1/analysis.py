@@ -56,7 +56,7 @@ class Microscope:
         # 标的历史价格
         self.prices_df = self.normalise_prices(self.timereturn, prices_df)
 
-    def normalise_prices(self, timereturn, prices_df):
+    def normalise_prices(self, timereturn, prices_df, starting_value=1):
         """
         Normalise the prices dataframe starting from 1 in order to
         compare the trend between prices and cumrets over the same timeframe
@@ -70,9 +70,9 @@ class Microscope:
         -------
         prices_df: Prices dataframe with the same timeframe
         """
-        prices_df.index = pd.to_datetime(prices_df.index)
         fromdate, todate = timereturn.index[0].date().isoformat(), timereturn.index[-1].date().isoformat()
         prices_df = prices_df.loc[fromdate:todate]['S_DQ_ADJCLOSE']
+        prices_df = (prices_df.pct_change().fillna(0) + 1).cumprod()
 
         return prices_df
         
@@ -281,37 +281,35 @@ class Microscope:
         -------
         Line graph of params trends over the timeframe 
         """
-        fig, ax1 = plt.subplots(figsize=self.figsize)
+        fig, ax1 = plt.subplots(figsize=self.figsize, sharex=True)
         
         # cumulative returns
-        cumrets.plot(ax=ax1, rot=45, grid=False, label="净值曲线", color="brown", linewidth=2)
+        ax1 = cumrets.plot(rot=45, grid=False, label="净值曲线", color="brown", linewidth=2)
+        ax1 = prices.plot(
+                grid=False, label='价格曲线',
+                alpha=0.7, color='grey', linewidth=2,
+                )
+        # ax1 = plt.plot(data=cumrets, color='brown', label='净值曲线')
 
         # drawdown and prices
         ax2 = ax1.twinx()
         ax2 = dd.plot.area(grid=False, label="回撤情况", alpha=0.3, color="tab:blue", linewidth=1)
 
-        ax3 = ax1.twinx()
-        prices.plot(
-                ax=ax3, grid=False, label='价格曲线',
-                alpha=0.4, color='grey', linewidth=2,
-                )
-        ax3.spines['right'].set_position(('outward', 60))  # outer axis
+        ax1.yaxis.set_ticks_position("left")
+        ax2.yaxis.set_ticks_position("right")
 
-        # ax1.set_xlabel("日期")
+        # ax3 = ax1.twiny()
+        # ax3.spines['right'].set_position(('outward', 60))  # outer axis
+
+        ax1.set_xlabel("日期")
         ax1.set_ylabel("净值")
         # ax2.set_ylabel('回撤情况')
         # ax3.set_ylabel('价格曲线')
 
-        ax1.set_xlim(metavar.fromdate, metavar.todate)
-        ax1.xaxis.set_major_locator(mdates.MonthLocator(interval=1))
-        ax1.yaxis.set_ticks_position("left")
-        ax2.yaxis.set_ticks_position("right")
-
         h1, l1 = ax1.get_legend_handles_labels()
         h2, l2 = ax2.get_legend_handles_labels()
-        h3, l3 = ax3.get_legend_handles_labels()
 
-        plt.legend(h1 + h2 + h3, l1 + l2 + l3, fontsize=12, ncol=1, loc="upper right")
+        plt.legend(h1 + h2, l1 + l2, fontsize=12, ncol=1, loc="upper right")
         plt.title(f"{metavar.contract}回测结果")
         plt.margins(x=0)
         fig.tight_layout()
@@ -328,7 +326,7 @@ class Microscope:
 
         fig, ax = plt.subplots(figsize=self.figsize)
         df.plot(
-                kind='bar', x='period', y=['return', 'sharpe', 'max_drawdown'],
+                kind='bar', x='period', y=['ann_rets', 'max_drawdown'],
                 ax=ax, rot=0, title='Performance for Different Lookback Period'
                 )
 
@@ -341,8 +339,8 @@ class Microscope:
 
 
 if __name__ == '__main__':
-    rets_file = "./timereturn.csv"
-    opt_results_path = "./opt_results.csv"
+    rets_file = "./results/timereturn.csv"
+    opt_results_path = "./results/opt_results.csv"
 
     rets_df = pd.read_csv(rets_file)
     rets_df = rets_df.rename(columns={'Unnamed: 0': 'Date', '0': 'timereturn'})
