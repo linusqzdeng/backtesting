@@ -12,53 +12,38 @@ import pyfolio as pyf
 import datetime
 import os, sys
 import warnings
-from IPython.core.display import display
 
 warnings.filterwarnings('ignore')
-
 
 class Config:
     """For global variable"""
 
-    # valid_contract = [16, 905, 300]  # IH, IC, IF
     valid_contracts = ['IF00', 'IH00', 'IC00']
+    contract = valid_contracts[2]
+
+    # 回测区间
+    fromdate = datetime.date(2010, 1, 1)
+    todate = datetime.date(2021, 12, 31)
+    filepath = os.path.abspath('../data.csv')
+    data = pd.read_csv(filepath, index_col='TRADE_DT', parse_dates=True)
+
+    # 交易参数
+    stamp_duty = 0.001
+    commission = 0.23 / 10000
+    startcash = 10_000_000
 
     def __init__(self):
-        # 回测区间
-        self._fromdate = datetime.date(2010, 4, 16)
-        self._todate = datetime.date(2021, 12, 21)
-
-        # 标的合约
-        self.contract = self.valid_contracts[0]
-
         # 数据处理
-        # filepath = os.path.join(os.path.abspath('..'), 'index.csv')
-        filepath = os.path.join(os.path.abspath('..'), 'data.csv')
-        raw_df = pd.read_csv(filepath, index_col='TRADE_DT', parse_dates=True)
-        self.df = self.create_df(raw_df, self.contract, 'daily')
+        self.df = self.create_df(self.data, self.contract, 'daily')
         self.first_days = self.get_firstday(self.df)  # keep records for the first day of the year
 
-
-        # # 交易参数
+        # 根据合约更改保证金和乘数
         self.mult = self.set_mult()
         self.margin = self.set_margin()
 
-        self.stamp_duty = 0.001
-        self.startcash = 10_000_000
         self.yr_startcash = self.startcash  # startcash at the beginning of each year
         self.brokervalue = self.startcash  # keep track of the current value in broker account
         self.tt_margin_used = 0
-
-        # 手续费
-        self.commission = 0.23 / 10000
-
-        # 通道参数 S1
-        # self.longlen = 20
-        # self.shortlen = 10
-
-        # 通道参数 S2
-        self.longlen = 50
-        self.shortlen = 20
 
     def create_df(self, raw_df, contract, freq):
         """
@@ -110,12 +95,11 @@ class Config:
 
     def get_firstday(self, df):
         """Return a list contains the first days for each year"""
-        all_dt = df.loc[self._fromdate.isoformat():self._todate.isoformat()].index.to_frame()
+        all_dt = df.loc[self.fromdate.isoformat():self.todate.isoformat()].index.to_frame()
         yearly_dt = [g for _, g in all_dt.groupby(pd.Grouper(key='TRADE_DT', freq='Y'))]
         first_days = [df['TRADE_DT'].iloc[0].date().isoformat() for df in yearly_dt]
 
         return first_days
-
 
 # global variable
 metavar = Config()
@@ -123,8 +107,9 @@ metavar = Config()
 
 class Logger:
     """将打印出的交易单保存为log文件"""
+    savepath = f"./logs/{metavar.contract}trades.log"
 
-    def __init__(self, filename=f"./logs/{metavar.contract}trades.log"):
+    def __init__(self, filename=savepath):
         self.terminal = sys.stdout
         self.log = open(filename, "w")
 
@@ -139,8 +124,8 @@ class Logger:
 class StockIndex(bt.feeds.PandasData):
     params = (
         ("nullvalue", np.nan),
-        ("fromdate", metavar._fromdate),
-        ("todate", metavar._todate),
+        ("fromdate", metavar.fromdate),
+        ("todate", metavar.todate),
         ("datetime", None),  # index of the dataframe
         ("open", 0),
         ("high", 1),
@@ -166,55 +151,17 @@ class TurtleSizer(bt.Sizer):
         return unit
 
 
-class DonchianChannels(bt.Indicator):
-    '''
-    Params Note:
-      - `lookback` (default: -1)
-        If `-1`, the bars to consider will start 1 bar in the past and the
-        current high/low may break through the channel.
-        If `0`, the current prices will be considered for the Donchian
-        Channel. This means that the price will **NEVER** break through the
-        upper/lower channel bands.
-    Reference: https://www.backtrader.com/recipes/indicators/donchian/donchian/
-    '''
-
-    alias = ('DCH', 'DonchianChannel',)
-    lines = (
-        'long_m', 'long_h', 'long_l',
-        'short_m', 'short_h', 'short_l',
-    ) 
-    params = (
-        ("longlen", metavar.longlen),
-        ("shortlen", metavar.shortlen),
-        ("lookback", -1),  # consider current bar or not
-    )
-
-    def __init__(self):
-        hi, lo = self.data.high, self.data.low
-        if self.p.lookback:  # move backwards as needed
-            hi, lo = hi(self.p.lookback), lo(self.p.lookback)
-        
-        # long length
-        self.l.long_h = bt.ind.Highest(hi, period=self.p.longlen)
-        self.l.long_l = bt.ind.Lowest(lo, period=self.p.longlen)
-        self.l.long_m = (self.l.long_h + self.l.long_l) / 2.0  # avg of the above
-
-        # short length
-        self.l.short_h = bt.ind.Highest(hi, period=self.p.shortlen)
-        self.l.short_l = bt.ind.Lowest(lo, period=self.p.shortlen)
-        self.l.short_m = (self.l.short_h + self.l.short_l) / 2.0  # avg of the above
-
-
 class Turtle(bt.Strategy):
     """Turtle trading system"""
 
     params = (
-        ("longlen", metavar.longlen),
-        ("shortlen", metavar.shortlen),
+        ("s1_longperiod", 20),
+        ("s1_shortperiod", 10),
+        ("s2_longperiod", 55),
+        ("s2_shortperiod", 20),
         ("bigfloat", 6),
         ("drawback", 1),
         ("closeout", 2),
-        ("addpos", 0.5),
         ("max_add", 3),
         ("theta", 0.01),
     )
@@ -225,19 +172,33 @@ class Turtle(bt.Strategy):
         self.datalow = self.datas[0].low
         self.datadatetime = self.datas[0].datetime
 
-        # 突破信号
-        self.donchian = DonchianChannels()
-        self.long_h = self.donchian.long_h
-        self.long_l = self.donchian.long_l
-        self.short_h = self.donchian.short_h
-        self.short_l = self.donchian.short_l
+        # if True, ignore the next 20days breakthrough
+        # look for a 55days breakthrough
+        self.ignore = False  
 
-        # 平仓
-        self.stoplimit = 2
+        # 突破通道
+        self.s1_long_h = bt.ind.Highest(self.datahigh(-1), period=self.p.s1_longperiod)
+        self.s1_long_l = bt.ind.Lowest(self.datalow(-1), period=self.p.s1_longperiod)
+        self.s1_short_h = bt.ind.Highest(self.datahigh(-1), period=self.p.s1_shortperiod)
+        self.s1_short_l = bt.ind.Lowest(self.datalow(-1), period=self.p.s1_shortperiod)
+        self.s1_longsig = bt.ind.CrossOver(self.dataclose(0), self.s1_long_h)
+        self.s1_shortsig = bt.ind.CrossOver(self.s1_long_l, self.dataclose(0))
+        self.s1_longexit = bt.ind.CrossOver(self.s1_short_l, self.dataclose(0))
+        self.s1_shortexit = bt.ind.CrossOver(self.dataclose(0), self.s1_short_h)
+
+        self.s2_long_h = bt.ind.Highest(self.datahigh(-1), period=self.p.s2_longperiod)
+        self.s2_long_l = bt.ind.Lowest(self.datalow(-1), period=self.p.s2_longperiod)
+        self.s2_short_h = bt.ind.Highest(self.datahigh(-1), period=self.p.s2_shortperiod)
+        self.s2_short_l = bt.ind.Lowest(self.datalow(-1), period=self.p.s2_shortperiod)
+        self.s2_longsig = bt.ind.CrossOver(self.dataclose(0), self.s2_long_h)
+        self.s2_shortsig = bt.ind.CrossOver(self.s2_long_l, self.dataclose(0))
+        self.s2_longexit = bt.ind.CrossOver(self.s2_short_l, self.dataclose(0))
+        self.s2_shortexit = bt.ind.CrossOver(self.dataclose(0), self.s2_short_h)
 
         # 头寸管理
-        self.atr = bt.ind.ATR(self.datas[0], period=self.p.longlen)
-        self.addpos_count = 0
+        self.tr = bt.ind.TR(self.datas[0])
+        self.atr = bt.ind.ATR(self.datas[0], period=20)
+        self.pos_count = 0
         self.tt_margin_used = 0
         self.ann_profit = 0
 
@@ -273,8 +234,8 @@ class Turtle(bt.Strategy):
                 self.log(
                         "LONG DETECTED @ {:.2f}, HH {:.2f}, LL {:.2f}, NET VALUE {:.2f}".format(
                     order.created.price,
-                    self.long_h[-1],
-                    self.long_l[-1],
+                    self.s1_long_h[-1],
+                    self.s1_long_l[-1],
                     self.broker.get_value(),
                     )
                 )
@@ -296,8 +257,8 @@ class Turtle(bt.Strategy):
                 self.log(
                     "SHORT DETECTED @ {:.2f}, HH {:.2f}, LL {:.2f} NET VALUE {:.2f}".format(
                     order.created.price,
-                    self.long_h[-1],
-                    self.long_l[-1],
+                    self.s1_long_h[-1],
+                    self.s1_long_l[-1],
                     self.broker.get_value(),
                     )
                 )
@@ -343,80 +304,88 @@ class Turtle(bt.Strategy):
         pass
 
     def next(self):
-        bypass_conds = [self.order, len(self) < metavar.longlen]
+        bypass_conds = [self.order, len(self) < self.p.s1_longperiod]
         if any(bypass_conds):
             return
-
-        # record the net value at the beginnign of each year
-        # metavar.brokervalue = self.broker.get_value()
-        # today = self.datadatetime.date(0).isoformat()
-        # if today in metavar.first_days:
-            # metavar.yr_startcash = self.broker.get_value()
-
-        # 是否实行紧缩平仓
-        # if self.is_trend():
-            # self.stoplimit = self.p.drawback
+        
+        # if not self.ignore:
+            # longsig = self.s1_longsig
+            # shortsig = self.s1_shortsig
+            # longexit = self.s1_longexit
+            # shortexit = self.s1_shortexit
         # else:
-            # self.stoplimit = 2
+            # longsig = self.s2_longsig
+            # shortsig = self.s2_shortsig
+            # longexit = self.s2_longexit
+            # shortexit = self.s2_shortexit
 
-        # 建仓信号
+        # # only use s2 system
+        longsig = self.s2_longsig
+        shortsig = self.s2_shortsig
+        longexit = self.s2_longexit
+        shortexit = self.s2_shortexit
+
+        now = bt.num2date(self.datadatetime[0]).isoformat()  # for debugging
+        size = self.get_size()
+
         if not self.position:
             # 通道突破
-            if self.dataclose[0] > self.long_h[0]:
-                self.order = self.buy()
-                self.order.addinfo(name='LONG POS CREATED')
-            elif self.dataclose[0] < self.long_l[0]:
-                self.order = self.sell()
-                self.order.addinfo(name='SHORT POS CREATED')
+            if longsig > 0:
+                self.order = self.buy(size=size)
+            elif shortsig > 0:
+                self.order = self.sell(size=-size)
 
         else:
-            # 平仓条件
             if self.position.size > 0:
                 price_change = self.dataclose[0] - self.buyprice
 
                 # 多头加仓
-                if (price_change >= self.p.addpos * self.atr[0])\
-                        and (self.addpos_count < self.p.max_add):
-                    self.order = self.buy()
-                    self.order.addinfo(name='ADD LONG POSITION')
-                    self.addpos_count += 1
-
+                if (price_change >= 0.5 * self.atr[0])\
+                        and (self.pos_count < self.p.max_add):
+                    self.order = self.buy(size=size)
+                    self.pos_count += 1
                 # 多头平仓
-                if (self.dataclose[0] < self.short_l)\
-                        or (price_change <= -self.stoplimit * self.atr[0]):
+                if longexit > 0:  # 赢利性退场
                     self.order = self.close()
-                    self.order.addinfo(name='CLOSE LONG DUE TO STOP LIMIT')
-                    self.addpos_count = 0
-                    self.isclosed = True
+                    self.pos_count = 0
+                    self.ignore = True
+                elif price_change <= -2 * self.atr[0]:  # 亏损性退场
+                    self.order = self.close()
+                    self.pos_count = 0
+                    self.ignore = False
 
             else:
                 price_change = self.dataclose[0] - self.sellprice
 
                 # 空头加仓
-                if (price_change <= -self.p.addpos * self.atr[0])\
-                        and (self.addpos_count < self.p.max_add):
-                    self.order = self.sell()
-                    self.order.addinfo(name='ADD SHORT POSITION')
-                    self.addpos_count += 1
+                if (price_change <= -0.5 * self.atr[0])\
+                        and (self.pos_count < self.p.max_add):
+                    self.order = self.sell(size=-size)
+                    self.pos_count += 1
 
                 # 空头平仓
-                if (self.dataclose[0] > self.short_h)\
-                        or (price_change >= self.stoplimit * self.atr[0]):
+                if shortexit > 0:  # 赢利性退场
                     self.order = self.close()
-                    self.order.addinfo(name='CLOSE SHORT DUE TO STOP LIMIT')
-                    self.addpos_count = 0
-                    self.isclosed = True
+                    self.pos_count = 0
+                    self.ignore = True
+                elif price_change >= 2 * self.atr[0]:  # 亏损性退场
+                    self.order = self.close()
+                    self.pos_count = 0
+                    self.ignore = False
 
     def stop(self):
         pass
 
     def get_size(self):
         """Calculate size based on ATR"""
-        abs_vol = self.atr[0] * metavar.mult  # N * CN
+        if len(self) <= 20:  # 头一个atr
+            n = self.atr[0]
+        else:
+            n = (19 * self.atr[-1] + self.tr[0]) / 20
+        abs_vol = n * metavar.mult  # N * CN
         unit = self.broker.get_value() * self.p.theta // abs_vol  # 1 unit
         
         return unit
-
 
     def is_trend(self):
         """判断是否有大趋势，如有则实行紧缩平仓参数"""
@@ -483,7 +452,7 @@ def run():
     cerebro.broker.setcash(metavar.startcash)
     comminfo = FurCommInfo()
     cerebro.broker.addcommissioninfo(comminfo)
-    cerebro.addsizer(TurtleSizer)
+    # cerebro.addsizer(TurtleSizer)
 
     # Analysers
     cerebro.addanalyzer(bt.analyzers.TimeReturn, _name="_TimeReturn")
@@ -492,8 +461,8 @@ def run():
     # Backtesting
     init_msg = f"""
             回测对象: {metavar.contract}
-            起始时间: {metavar._fromdate}
-            终止时间: {metavar._todate}
+            起始时间: {metavar.fromdate}
+            终止时间: {metavar.todate}
             合约点值: {metavar.mult}
             最低保证金: {metavar.margin}
             开仓/平仓手续费: {0.23 / 10000:.4%}
@@ -539,8 +508,9 @@ def run():
         "胜率": sum(rets > 0) / sum(rets != 0),
         "盈亏比": abs(mean_per_win / mean_per_loss),
     }
-
-    print(pd.Series(results_dict))
+    results_series = pd.Series(results_dict)
+    print(pd.Series(results_series))
+    pd.Series.to_clipboard(results_series)
 
     pyfoliozer = strats.analyzers.getbyname('pyfolio')
     returns, positions, transactions, gross_lev = pyfoliozer.get_pf_items()
@@ -557,8 +527,10 @@ def run():
     gross_lev.to_csv('./results/gross_lev.csv')
     perf_df.to_csv('./results/perf_df.csv')
 
+    print(perf_df)
 
 if __name__ == "__main__":
     run()
+    # print(metavar.df.head(50))
 
 

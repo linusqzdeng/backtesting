@@ -3,6 +3,7 @@ import numpy as np
 import empyrical as emp
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
+import matplotlib.dates as mdates
 import seaborn as sns
 
 import datetime
@@ -68,9 +69,10 @@ class Microscope:
         """
         fromdate, todate = timereturn.index[0].date().isoformat(), timereturn.index[-1].date().isoformat()
         prices_df = prices_df.loc[fromdate:todate]['S_DQ_ADJCLOSE']
-        prices_df = (prices_df.pct_change().fillna(0) + 1).cumprod()
+        prices_rets = emp.simple_returns(prices_df)
+        prices_cumrets = emp.cum_returns(prices_rets, starting_value=1)
 
-        return prices_df
+        return prices_cumrets
         
     def sep_month_and_year(self, df):
         df['year'] = df.index.year
@@ -284,17 +286,16 @@ class Microscope:
                 grid=False, label='价格曲线',
                 alpha=0.7, color='grey', linewidth=2,
                 )
-        # ax1 = plt.plot(data=cumrets, color='brown', label='净值曲线')
 
         # drawdown and prices
         ax2 = ax1.twinx()
         ax2 = dd.plot.area(grid=False, label="回撤情况", alpha=0.3, color="tab:blue", linewidth=1)
 
+        ax1.set_xlim([cumrets.index[0], cumrets.index[-1]])
+        ax1.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
+        ax1.xaxis.set_major_locator(mdates.MonthLocator(interval=6))
         ax1.yaxis.set_ticks_position("left")
         ax2.yaxis.set_ticks_position("right")
-
-        # ax3 = ax1.twiny()
-        # ax3.spines['right'].set_position(('outward', 60))  # outer axis
 
         ax1.set_xlabel("日期")
         ax1.set_ylabel("净值")
