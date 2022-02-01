@@ -3,14 +3,14 @@ import numpy as np
 import empyrical as emp
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
+import matplotlib.dates as mdates
 import seaborn as sns
 
 import datetime
-import config
-
+from enhanced_rsi import Config
 
 # initialise the global var
-metavar = config.set_contract_var()
+metavar = Config()
 
 # initialise pyplot settings
 plt.rcParams["axes.unicode_minus"] = False  # display minus sign correctly
@@ -19,10 +19,7 @@ plt.rcParams["font.family"] = ["Heiti TC"]  # for Chinese characters
 
 class Microscope:
     # Reproduce intuitive plots for timeseries data analysis
-
-    params = {
-            'figsize': (12, 8)
-            }
+    figsize = (12, 8)
 
     def __init__(self, results_df: pd.DataFrame, prices_df: pd.DataFrame):
         """
@@ -44,18 +41,20 @@ class Microscope:
         self.timereturn = results_df
         self.detailed_rets = self.sep_month_and_year(self.timereturn)
 
+        # 年化和月化收益率
         self.ann_rets, self.ann_mean = self.cal_annual_rets(self.detailed_rets)
         self.month_rets = self.cal_monthly_rets(self.detailed_rets)
 
+        # 净值和回撤
         self.cumrets = emp.cum_returns(self.timereturn['timereturn'], starting_value=1.0)
         maxrets = self.cumrets.cummax()
         self.drawdown = (self.cumrets - maxrets) / maxrets
-
         self.ann_mdd, self.calmar = self.cal_annual_mdd_calmar(self.detailed_rets)
         
+        # 标的历史价格
         self.prices_df = self.normalise_prices(self.timereturn, prices_df)
 
-    def normalise_prices(self, timereturn, prices_df):
+    def normalise_prices(self, timereturn, prices_df, starting_value=1):
         """
         Normalise the prices dataframe starting from 1 in order to
         compare the trend between prices and cumrets over the same timeframe
@@ -69,9 +68,9 @@ class Microscope:
         -------
         prices_df: Prices dataframe with the same timeframe
         """
-        prices_df.index = pd.to_datetime(prices_df.index)
         fromdate, todate = timereturn.index[0].date().isoformat(), timereturn.index[-1].date().isoformat()
         prices_df = prices_df.loc[fromdate:todate]['S_DQ_ADJCLOSE']
+        prices_df = (prices_df.pct_change().fillna(0) + 1).cumprod()
 
         return prices_df
         
@@ -185,7 +184,7 @@ class Microscope:
         -------
         bar chart for annual returns
         """
-        fig, ax1 = plt.subplots(figsize=self.params['figsize'])
+        fig, ax1 = plt.subplots(figsize=self.figsize)
         ax1 = sns.barplot(
             x=ann_mdd.index, y=ann_mdd.values,
             color='brown', capsize=0.3, label='最大回撤'
@@ -243,10 +242,10 @@ class Microscope:
         -------
         Heatmap of monthly return
         """
-        fig, ax = plt.subplots(figsize=self.params['figsize'])
+        fig, ax = plt.subplots(figsize=self.figsize)
         values = monthly_rets.values  # np.array of the monthly returns
 
-        ax = sns.heatmap(monthly_rets, cmap='RdBu', cbar=True)
+        ax = sns.heatmap(monthly_rets, cmap='Blues', cbar=True)
 
         # make sure the annot is in the center of the block
         # while also in a percentage format
@@ -280,35 +279,33 @@ class Microscope:
         -------
         Line graph of params trends over the timeframe 
         """
-        fig, ax1 = plt.subplots(figsize=self.params['figsize'])
+        fig, ax1 = plt.subplots(figsize=self.figsize, sharex=True)
         
         # cumulative returns
-        cumrets.plot(ax=ax1, rot=45, grid=False, label="净值曲线", color="brown", linewidth=2)
+        ax1 = cumrets.plot(rot=45, grid=False, label="净值曲线", color="brown", linewidth=2)
+        ax1 = prices.plot(
+                grid=False, label='价格曲线',
+                alpha=0.7, color='grey', linewidth=2,
+                )
+        # ax1.xaxis.set_major_locator(mdates.MonthLocator(bymonth=(1, 6)))
+        # ax1.xaxis.set_minor_locator(mdates.MonthLocator(interval=1))
 
         # drawdown and prices
         ax2 = ax1.twinx()
         ax2 = dd.plot.area(grid=False, label="回撤情况", alpha=0.3, color="tab:blue", linewidth=1)
 
-        ax3 = ax1.twinx()
-        prices.plot(
-                ax=ax3, grid=False, label='价格曲线',
-                alpha=0.4, color='grey', linewidth=2,
-                )
-        ax3.spines['right'].set_position(('outward', 60))  # outer axis
+        ax1.yaxis.set_ticks_position("left")
+        ax2.yaxis.set_ticks_position("right")
 
         ax1.set_xlabel("日期")
         ax1.set_ylabel("净值")
         # ax2.set_ylabel('回撤情况')
         # ax3.set_ylabel('价格曲线')
 
-        ax1.yaxis.set_ticks_position("left")
-        ax2.yaxis.set_ticks_position("right")
-
         h1, l1 = ax1.get_legend_handles_labels()
         h2, l2 = ax2.get_legend_handles_labels()
-        h3, l3 = ax3.get_legend_handles_labels()
 
-        plt.legend(h1 + h2 + h3, l1 + l2 + l3, fontsize=12, ncol=1, loc="upper right")
+        plt.legend(h1 + h2, l1 + l2, fontsize=12, ncol=1, loc="upper right")
         plt.title(f"{metavar.contract}回测结果")
         plt.margins(x=0)
         fig.tight_layout()
@@ -316,16 +313,34 @@ class Microscope:
         plt.savefig(f'./images/{metavar.contract}rets_dd_prices.png')
         plt.show()
 
+    def plot_opt_results(self, df):
+        """
+        Bar chart compares the annual returns, calmar ratio
+        and the sharpe ratio for different parameters
+        """
+        plt.style.use('seaborn')
+
+        fig, ax = plt.subplots(figsize=self.figsize)
+        df.plot(
+                kind='bar', x='period', y=['ann_rets', 'max_drawdown'],
+                ax=ax, rot=0, title='Performance for Different Lookback Period'
+                )
+
+        ax.axhline(0, color='black', linewidth=0.2)
+
+        plt.grid(False)
+        plt.savefig('./images/params_performance.png')
+        fig.tight_layout()
+        plt.show()
+
 
 if __name__ == '__main__':
-    rets_file = "./timereturn.csv"
-    prices_file = f"./5m_main_contracts/{metavar.contract}.csv"
-
+    rets_file = "./results/timereturn.csv"
     rets_df = pd.read_csv(rets_file)
     rets_df = rets_df.rename(columns={'Unnamed: 0': 'Date', '0': 'timereturn'})
     rets_df.set_index('Date', inplace=True)
     rets_df.index = pd.to_datetime(rets_df.index)
-    prices_df = pd.read_csv(prices_file, index_col='TRADE_DT')
+    prices_df = metavar.shortlen_df.loc[metavar.fromdate:metavar.todate]
 
     ind = Microscope(rets_df, prices_df)
     
@@ -340,4 +355,3 @@ if __name__ == '__main__':
     ind.plot_annrets_mdd_calmar(ann_rets, ann_mean, ann_mdd, ann_calmar)
     ind.plot_month_rets_heatmap(monthly_rets)
     ind.plot_cumrets_dd_prices(ind.cumrets, ind.drawdown, ind.prices_df)
-

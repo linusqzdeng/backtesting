@@ -36,8 +36,8 @@ class Contract:
         self.time_df = self.get_timedf(time_filepath)
 
         # 回测区间设置
-        self._fromdate = fromdate or self.time_df.index[0].to_pydatetime().date()
-        self._todate = todate or self.time_df.index[-1].to_pydatetime().date()
+        self.fromdate = fromdate or self.time_df.index[0].to_pydatetime().date()
+        self.todate = todate or self.time_df.index[-1].to_pydatetime().date()
 
         # 保证金比例和合约乘数
         self.margin = self.set_margin(self.contract)

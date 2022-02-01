@@ -7,11 +7,92 @@ import empyrical as emp
 import numpy as np
 import pandas as pd
 
-import config
-from ast import literal_eval
 
+class Config:
 
-metavar = config.set_contract_var()
+    valid_contracts = ["IF00", "IH00", "IC00"]
+    contract = valid_contracts[0]
+
+    data = os.path.abspath('../data.csv')
+    df = pd.read_csv(data, index_col='TRADE_DT', parse_dates=True)
+    fromdate = datetime.date(2010, 4, 16)
+    todate = datetime.date(2015, 12, 21)
+
+    startcash = 10_000_000
+    stamp_duty = 0.001
+    is_ctp = False  # 是否平今仓
+
+    def __init__(self):
+        # 交易时间表
+        self.shortlen_df = self.create_df(self.df, self.contract, '5Min')
+        self.longlen_df = self.create_df(self.df, self.contract, '15Min')
+        self.time_df = self.create_timedf(self.shortlen_df)
+
+        # 保证金比例和合约乘数
+        self.margin = self.set_margin(self.contract)
+        self.mult = self.set_mult(self.contract)
+
+    def get_timedf(self, path):
+        """Return the time df that contains the trading bars per day"""
+        timedf = pd.read_csv(path, index_col='date')
+        timedf.index = pd.to_datetime(timedf.index)
+
+        return timedf
+
+    def set_margin(self, contract):
+        # 保证金设置
+        if contract in ["IH00", "IC00"]:
+            return 0.10
+        elif contract == "IF00":
+            return 0.12
+        
+        raise TypeError('Unvalid contract name')
+    
+    def set_mult(self, contract):
+        # 乘数设置
+        if contract in ["IF00", "IH00"]:
+            return 300.0
+        elif contract == "IC00":
+            return 200.0
+
+        raise TypeError('Unvalid contract name')
+
+    def create_df(self, raw_df, contract, freq):
+        """
+        Convert the raw .csv file into the target
+        dataframe with specified frequency
+        """
+        df = raw_df[raw_df["S_INFO_CODE"] == contract]
+
+        adj_cols = [
+            "S_DQ_ADJOPEN",
+            "S_DQ_ADJHIGH",
+            "S_DQ_ADJLOW",
+            "S_DQ_ADJCLOSE",
+        ]
+        pre_cols = ["S_DQ_OPEN", "S_DQ_HIGH", "S_DQ_LOW", "S_DQ_CLOSE"]
+
+        for pre_col, adj_col in zip(pre_cols, adj_cols):
+            df.loc[:, adj_col] = round(df.loc[:, pre_col] * df.loc[:, "S_DQ_ADJFACTOR"], 1)
+
+        df = df[adj_cols]
+        methods = ["first", "max", "min", "last"]
+        agg_dict = {col: method for col, method in zip(adj_cols, methods)}
+
+        df = df.resample(freq).agg(agg_dict).dropna()
+
+        return df
+
+    def create_timedf(self, df):
+        """Return the time df that contains the trading bars per day"""
+        timedf = pd.DataFrame(index=df.index.date)
+        timedf["time"] = df.index.time
+        timedf = timedf.groupby(timedf.index).apply(lambda x: list(x["time"]))
+        timedf.index = pd.to_datetime(timedf.index)
+
+        return timedf
+
+metavar = Config()
 
 
 class Logger:
@@ -32,14 +113,14 @@ class Logger:
 class MainContract(bt.feeds.PandasData):
     params = (
         ("nullvalue", np.nan),
-        ("fromdate", metavar._fromdate),
-        ("todate", metavar._todate),
+        ("fromdate", metavar.fromdate),
+        ("todate", metavar.todate),
         ("datetime", None),  # index of the dataframe
         ("open", 0),
         ("high", 1),
         ("low", 2),
         ("close", 3),
-        ("volume", 4),
+        ("volume", -1),
         ("openinterest", -1),
     )
 
@@ -66,54 +147,40 @@ class FurCommInfo(bt.CommInfoBase):
         - 平昨仓/止盈止损平仓: 0.23 / 10000
         - 平今仓: 3.45 / 10000
         """
-        if metavar.closeout_type == 1:
+        if metavar.is_ctp == True:
             self.p.commission = 3.45 / 10000  # 平今仓
         else:
             self.p.commission = 0.23 / 10000  # 止盈止损平仓/开仓
 
-        if size > 0:
-            return abs(size) * price * self.p.commission * self.p.mult
-        else:  # 卖出时考虑印花税
-            return abs(size) * price * self.p.commission * self.p.mult
+        return abs(size) * price * self.p.commission * self.p.mult
 
     def get_margin(self, price):
         """每笔交易保证金=合约价格*合约乘数*保证金比例"""
-        return price * self.p.mult * self.p.backtest_margin
+        return price * self.p.mult * self.p.margin
 
 
 class FurSizer(bt.Sizer):
     """基于真是波动幅度的头寸管理"""
 
     params = (
-        ("theta", 0.02),  # 风险载荷
-        ("adj_func", 1.0),  # 头寸调整函数
-        ("fund", 100_000),  # 配置资金
-        ("mult", 300),  # 合约乘数
-        ("period", 11),  # 回测窗口
+        ("theta", 0.01),  # 风险载荷
+        ("mult", metavar.mult),  # 合约乘数
     )
 
     def _getsizing(self, comminfo, cash, data, isbuy):
-        # price_change = abs(data.close[self.p.period] - data.close[0])
-        # k_std = np.std(data.close.get(ago=0, size=self.p.period))  # 计算当前时间点前period天收盘价的标准差
-        # size = self.p.adj_func * self.p.theta * self.p.fund // (k_std * price_change * self.p.mult) if price_change != 0 else 0
+        abs_vol = self.strategy.atr[0] * self.p.mult  # N * CN
+        unit = self.broker.get_value() * self.p.theta // abs_vol  # 1 unit
 
-        tr = [
-            max(data.high[0], data.close[-i]) - min(data.low[0], data.close[-i])
-            for i in range(1, self.p.period + 1)
-        ]  # true range
-        atr = sum(tr) / self.p.period  # 真实波动幅度
-        size = self.p.adj_func * self.p.theta * self.p.fund // (atr * self.p.mult)
-
-        return min(size, data.volume[0])  # 取计算所得值和当天成交量的最小值
+        return unit
 
 
 class EnhancedRSI(bt.Strategy):
     params = (
         ("period", 14),  # 参考研报
-        ("thold_l", 60),
-        ("thold_s", 70),
-        ("closeout_limit", 0.02),
-        ("target_percent", 0.30),
+        ("thold_l", 50),
+        ("thold_s", 80),
+        ("stop_limit", 0.02),
+        ("target_percent", 0.40),
     )
 
     def log(self, txt, dt=None):
@@ -127,85 +194,18 @@ class EnhancedRSI(bt.Strategy):
         self.datadatetime = self.datas[0].datetime
 
         # 设置指标
-        self.rsi_s = bt.ind.RSI_SMA(self.datas[0], period=self.p.period, safediv=True)
-        self.rsi_l = bt.ind.RSI_SMA(self.datas[1], period=self.p.period, safediv=True)
+        self.rsi_s = bt.ind.RSI(self.datas[0], period=self.p.period, safediv=True)
+        self.rsi_l = bt.ind.RSI(self.datas[1], period=self.p.period, safediv=True)
+        self.atr = bt.ind.ATR(self.datas[0], period=self.p.period)
+
+        # 做多信号：长期RSI > L & 短期RSI > S
+        # 做空信号：长期RSI < 100-L & 短期RSI < 100-S
+        self.longsig = bt.ind.And(self.rsi_l > self.p.thold_l, self.rsi_s > self.p.thold_s)
+        self.shortsig = bt.ind.And(self.rsi_l < 100 - self.p.thold_l, self.rsi_s < 100 - self.p.thold_s)
 
         # 处理等待中的order
         self.order = None
-        # self.ordermin = None
-
-    def start(self):
-        # Observers数据写入本地文件
-        self.mystats = csv.writer(open("results.csv", "w"))
-        self.mystats.writerow(
-            [
-                "datetime",
-                "drawdown",
-                "maxdrawdown",
-                "timereturn",
-                "value",
-                "cash",
-                "pnlplus",
-                "pnlminus",
-            ]
-        )
-
-    def next(self):
-        today = bt.num2date(self.datadatetime[0]).date()
-        trading_period = literal_eval(self.get_tradetime(today).values[0])
-        open_time = trading_period[0]
-        close_time = trading_period[-2]  # 使用收盘时间前一个bar作为平今仓信号
-        now = bt.num2time(self.datadatetime[0]).isoformat()
-
-        # 记录当天开盘价
-        if now == open_time:
-            self.open_price = self.dataopen[0]
-
-        # 跳过当前交易的条件
-        bypass_conds = [
-            self.order,
-            # now == self.ordermin,
-            today == metavar._fromdate,  # 跳过第一天
-        ]
-        if any(bypass_conds):
-            return
-
-        # 交易信号
-        # 做多信号：长期RSI > L & 短期RSI > S
-        # 做空信号：长期RSI < 100-L & 短期RSI < 100-S
-        long_sig = (self.rsi_l > self.params.thold_l) and (self.rsi_s > self.params.thold_s)
-        short_sig = (self.rsi_l < 100 - self.params.thold_l) and (self.rsi_s < 100 - self.params.thold_s)
-
-        # 策略逻辑
-        metavar.closeout_type = 0
-        if not self.position and now != close_time:  # 收盘前一个bar不建仓
-            if long_sig:
-                self.order = self.order_target_percent(target=self.p.target_percent)
-            elif short_sig:
-                self.order = self.order_target_percent(target=-self.p.target_percent)
-        else:
-            # 判断是否平今仓
-            if now == close_time and self.position:
-                metavar.closeout_type = 1
-                self.order = self.close()
-                self.order.addinfo(name="CLOSE OUT AT THE END OF THE DAY")
-            else:
-                # 止损平仓
-                pct_change = self.dataclose[0] / self.open_price - 1  # 基于每日开盘价收益率
-                cur_pos = self.broker.getposition(data=self.datas[0]).size
-                long_close_sig = cur_pos > 0 and (pct_change < -self.p.closeout_limit)  # 持有多头且下跌超过阈值
-                short_close_sig = cur_pos < 0 and (pct_change > self.p.closeout_limit)  # 持有空头且上涨超过阈值
-
-                if long_close_sig or short_close_sig:
-                    self.order = self.order_target_percent(target=0)
-                    self.order.addinfo(name="CLOSE OUT DUE TO STOPLIMIT")
-
-        # Observers数据写入本地文件
-        self.write_obs(-1)
-
-    def stop(self):
-        # Observers数据写入本地文件 - 最后一个bar
-        self.write_obs(0)
+        self.open_price = metavar.shortlen_df.iloc[0]['S_DQ_ADJOPEN']
 
     def notify_order(self, order):
         # 不处理已提交或已接受的订单
@@ -220,17 +220,28 @@ class EnhancedRSI(bt.Strategy):
                 * metavar.mult
                 * metavar.margin
             )
-            # self.ordermin = bt.num2time(self.datadatetime[0]).isoformat()
 
             if order.isbuy():
-                self.log(f"LONG SIG DETECTED @ {order.created.price:.2f}")
                 self.log(
-                    f"BUY EXECUTED {order.executed.price:.2f}, SIZE {order.executed.size:.2f}, COST {order.executed.value:.2f}, COMMISSION {order.executed.comm:.2f}, MARGIN {margin_used:.2f}"
+                    "LONG DETECTED @ {:.2f}, EXECUTED @ {:.2f}, SIZE {:.2f}, COST {:.2f}, COMMISSION {:.2f}, MARGIN {:.2f}".format(
+                        order.created.price,
+                        order.executed.price,
+                        order.executed.size,
+                        order.executed.value,
+                        order.executed.comm,
+                        margin_used,
+                    )
                 )
             elif order.issell():
-                self.log(f"SHORT SIG DETECTED @ {order.created.price:.2f}")
                 self.log(
-                    f"SELL EXECUTED {order.executed.price:.2f}, SIZE {order.executed.size:.2f}, COST {order.executed.value:.2f}, COMMISSION {order.executed.comm:.2f}, MARGIN {margin_used:.2f}"
+                    "SHORT DETECTED @ {:.2f}, EXECUTED @ {:.2f}, SIZE {:.2f}, COST {:.2f}, COMMISSION {:.2f}, MARGIN {:.2f}".format(
+                        order.created.price,
+                        order.executed.price,
+                        order.executed.size,
+                        order.executed.value,
+                        order.executed.comm,
+                        margin_used,
+                    )
                 )
 
             if order.info:
@@ -253,9 +264,74 @@ class EnhancedRSI(bt.Strategy):
             f"OPERATION PROFIT {trade.pnl:.2f}, NET PROFIT {trade.pnlcomm:.2f}, TRADE AT BAR {self.bar_traded}"
         )
 
-    def get_tradetime(self, today) -> list:
-        """获取当日所有交易时间点"""
-        return metavar.time_df.loc[today.isoformat()]
+    def start(self):
+        # Observers数据写入本地文件
+        self.mystats = csv.writer(open("results.csv", "w"))
+        self.mystats.writerow(
+            [
+                "datetime",
+                "drawdown",
+                "maxdrawdown",
+                "timereturn",
+                "value",
+                "cash",
+                "pnlplus",
+                "pnlminus",
+            ]
+        )
+
+    def next(self):
+        date = bt.num2date(self.datadatetime[0]).date().isoformat()
+        time = bt.num2time(self.datadatetime[0])
+        trade_time = metavar.time_df.loc[date]
+        open_time = trade_time[0]
+        close_time = trade_time[-2]  # 使用收盘时间前一个bar作为平今仓信号
+
+        # 记录当天开盘价
+        if time == open_time:
+            self.open_price = self.dataopen[0]
+
+        # 跳过当前交易的条件
+        bypass_conds = [
+            self.order,
+            len(self) < self.p.period,
+        ]
+        if any(bypass_conds):
+            return
+
+        # 策略逻辑
+        metavar.is_ctp = False 
+        if not self.position and time != close_time:  # 临近收盘不建仓
+            if self.longsig:
+                self.order = self.order_target_percent(target=self.p.target_percent)
+                # self.order = self.buy()
+            elif self.shortsig:
+                self.order = self.order_target_percent(target=-self.p.target_percent)
+                # self.order = self.sell()
+        else:
+            # 判断是否平今仓
+            if time == close_time and self.position:
+                metavar.is_ctp = True
+                self.order = self.close()
+                self.order.addinfo(name="CLOSE OUT AT THE END OF THE DAY")
+            else:
+                # 止损平仓
+                pct_change = self.dataclose[0] / self.open_price - 1  # 基于每日开盘价收益率
+                cur_pos = self.broker.getposition(data=self.datas[0]).size
+                long_close_sig = cur_pos > 0 and (pct_change < -self.p.stop_limit)  # 持有多头且下跌超过阈值
+                short_close_sig = cur_pos < 0 and (pct_change > self.p.stop_limit)  # 持有空头且上涨超过阈值
+
+                if long_close_sig or short_close_sig:
+                    self.order = self.close()
+                    self.order.addinfo(name="CLOSE OUT DUE TO STOPLIMIT")
+
+        # Observers数据写入本地文件
+        self.write_obs(-1)
+
+    def stop(self):
+        # Observers数据写入本地文件 - 最后一个bar
+        self.write_obs(0)
+
 
     def write_obs(self, t):
         self.mystats.writerow(
@@ -272,44 +348,17 @@ class EnhancedRSI(bt.Strategy):
         )
 
 
-def data_cleansing(filepath):
-    """返回短期和长期价格序列"""
-    # 保留字段OHLC, Volume
-    cols = [
-        "S_DQ_ADJOPEN",
-        "S_DQ_ADJHIGH",
-        "S_DQ_ADJLOW",
-        "S_DQ_ADJCLOSE",
-        "S_DQ_VOLUME",
-    ]
-
-    # Read .csv file and set TRADE_DT as index
-    short_df = pd.read_csv(filepath, index_col="TRADE_DT")
-
-    # 过滤字段
-    short_df = short_df[cols]
-
-    # Change TRADE_DT into datetime type
-    short_df.index = pd.to_datetime(short_df.index)
-    long_df = short_df.resample(rule="15min", origin="start").last().dropna()
-
-    return short_df, long_df
-
-
-if __name__ == "__main__":
+def run():
     # 保存回测交易单到本地
     sys.stdout = Logger()
-
-    # For handling input data
-    short_df, long_df = data_cleansing(metavar.filepath)
 
     # Initiate the strategy
     cerebro = bt.Cerebro()
     cerebro.addstrategy(EnhancedRSI)
 
     # Load datas
-    data0 = MainContract(dataname=short_df)
-    data1 = MainContract(dataname=long_df)
+    data0 = MainContract(dataname=metavar.shortlen_df)
+    data1 = MainContract(dataname=metavar.longlen_df)
 
     # Add data feeds
     cerebro.adddata(data0, name="short")
@@ -317,11 +366,7 @@ if __name__ == "__main__":
 
     # Add analyser
     cerebro.addanalyzer(bt.analyzers.TimeReturn, _name="_TimeReturn")
-    cerebro.addanalyzer(bt.analyzers.TimeDrawDown, _name="_TimeDrawDown")
-    cerebro.addanalyzer(bt.analyzers.DrawDown, _name="_DrawDown")
-    cerebro.addanalyzer(bt.analyzers.Returns, _name="_Return")
     cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name="_Sharpe")
-    cerebro.addanalyzer(bt.analyzers.SharpeRatio_A, _name="_AnnualSharpe")
     cerebro.addanalyzer(bt.analyzers.Returns, _name="_AnnualReturn")
 
     # Add observers
@@ -344,8 +389,8 @@ if __name__ == "__main__":
     init_msg = f"""
             策略: 改良长短RSI
             回测对象: {metavar.contract}
-            起始时间: {metavar._fromdate}
-            终止时间: {metavar._todate}
+            起始时间: {metavar.fromdate}
+            终止时间: {metavar.todate}
             合约点值: {metavar.mult}
             最低保证金: {metavar.margin}
             开仓/平仓手续费: {0.23 / 10000:.4%}
@@ -367,17 +412,14 @@ if __name__ == "__main__":
     # ======================================== #
 
     cumrets = emp.cum_returns(rets, starting_value=0)
-    maxrets = cumrets.cummax()
-    drawdown = (cumrets - maxrets) / maxrets
+    num_years = metavar.todate.year - metavar.fromdate.year
+    ann_rets = (1 + cumrets[-1]) ** (1 / num_years) - 1
     max_drawdown = emp.max_drawdown(rets)
     calmar_ratio = emp.calmar_ratio(rets)
 
     # 夏普比率
-    num_years = metavar._todate.year - metavar._fromdate.year
     yearly_trade_times = rets.shape[0] / num_years
-    ann_rets = (1 + cumrets[-1]) ** (1 / num_years) - 1
-    risk_free = 0
-    sharpe = emp.sharpe_ratio(rets, risk_free=risk_free, annualization=yearly_trade_times)  # 4.5h 交易时间
+    sharpe = emp.sharpe_ratio(rets, risk_free=0, annualization=yearly_trade_times)  # 4.5h 交易时间
 
     # 盈亏比
     mean_per_win = (rets[rets > 0]).mean()
@@ -402,6 +444,7 @@ if __name__ == "__main__":
     }
 
     results_df = pd.Series(results_dict)
-    results_df.to_clipboard()
     print(results_df)
 
+if __name__ == "__main__":
+    run()
