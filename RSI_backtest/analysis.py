@@ -7,7 +7,7 @@ import matplotlib.dates as mdates
 import seaborn as sns
 
 import datetime
-from enhanced_rsi import Config
+from main import Config
 
 # initialise the global var
 metavar = Config()
@@ -21,7 +21,7 @@ class Microscope:
     # Reproduce intuitive plots for timeseries data analysis
     figsize = (12, 8)
 
-    def __init__(self, results_df: pd.DataFrame, prices_df: pd.DataFrame):
+    def __init__(self, results_df: pd.DataFrame, prices_df: pd.DataFrame, opt_df):
         """
         Params
         ------
@@ -38,6 +38,7 @@ class Microscope:
         - drawdown:
         """
         # essential attributes
+        self.opt_df = opt_df
         self.timereturn = results_df
         self.detailed_rets = self.sep_month_and_year(self.timereturn)
 
@@ -98,10 +99,8 @@ class Microscope:
 
         # scale the min returns to annual return
         for year in years:
-            # year_summary = df[df['year'] == year].describe()['timereturn']
-            # ann_rets[year] = year_summary['mean'] * year_summary['count']
             min_rets = df[df['year'] == year]['timereturn']
-            ann_rets[year] = emp.cum_returns_final(min_rets, starting_value=1) - 1  # (1 + rets) ** (1 / num_year) - 1
+            ann_rets[year] = emp.cum_returns_final(min_rets, starting_value=1) - 1
 
         ann_rets = pd.Series(ann_rets)
         ann_mean = ann_rets.mean()
@@ -325,6 +324,7 @@ class Microscope:
                 kind='bar', x='period', y=['ann_rets', 'max_drawdown'],
                 ax=ax, rot=0, title='Performance for Different Lookback Period'
                 )
+        
 
         ax.axhline(0, color='black', linewidth=0.2)
 
@@ -332,17 +332,31 @@ class Microscope:
         plt.savefig('./images/params_performance.png')
         fig.tight_layout()
         plt.show()
+    
+    def plot_opt_results(self, opt_df: pd.DataFrame):
+        plt.style.use('seaborn')
+
+        fig, ax = plt.subplots(figsize=self.figsize)
+        heatmap_df = opt_df.pivot(index='thold_s', columns='thold_l', values='calmar_ratio')
+        sns.heatmap(heatmap_df, cmap='mako')
+
+        plt.title('Calmar ratio in different thresholds', fontsize=14)
+        plt.savefig('./images/opt_heatmap.png')
+        plt.show()
 
 
 if __name__ == '__main__':
     rets_file = "./results/timereturn.csv"
+    opt_resulst = "./results/opt_results.csv"
+
+    opt_df = pd.read_csv(opt_resulst)
     rets_df = pd.read_csv(rets_file)
     rets_df = rets_df.rename(columns={'Unnamed: 0': 'Date', '0': 'timereturn'})
     rets_df.set_index('Date', inplace=True)
     rets_df.index = pd.to_datetime(rets_df.index)
     prices_df = metavar.shortlen_df.loc[metavar.fromdate:metavar.todate]
 
-    ind = Microscope(rets_df, prices_df)
+    ind = Microscope(rets_df, prices_df, opt_df)
     
     # calculate annually and monthly returns
     ann_rets, ann_mean = ind.ann_rets, ind.ann_mean
@@ -355,3 +369,4 @@ if __name__ == '__main__':
     ind.plot_annrets_mdd_calmar(ann_rets, ann_mean, ann_mdd, ann_calmar)
     ind.plot_month_rets_heatmap(monthly_rets)
     ind.plot_cumrets_dd_prices(ind.cumrets, ind.drawdown, ind.prices_df)
+    ind.plot_opt_results(ind.opt_df)
