@@ -286,13 +286,14 @@ class Microscope:
                 grid=False, label='价格曲线',
                 alpha=0.7, color='grey', linewidth=2,
                 )
-        # ax1.xaxis.set_major_locator(mdates.MonthLocator(bymonth=(1, 6)))
-        # ax1.xaxis.set_minor_locator(mdates.MonthLocator(interval=1))
 
         # drawdown and prices
         ax2 = ax1.twinx()
         ax2 = dd.plot.area(grid=False, label="回撤情况", alpha=0.3, color="tab:blue", linewidth=1)
 
+        ax1.set_xlim([cumrets.index[0], cumrets.index[-1]])
+        ax1.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
+        ax1.xaxis.set_major_locator(mdates.MonthLocator(interval=5))
         ax1.yaxis.set_ticks_position("left")
         ax2.yaxis.set_ticks_position("right")
 
@@ -303,6 +304,7 @@ class Microscope:
 
         h1, l1 = ax1.get_legend_handles_labels()
         h2, l2 = ax2.get_legend_handles_labels()
+        # h3, l3 = ax3.get_legend_handles_labels()
 
         plt.legend(h1 + h2, l1 + l2, fontsize=12, ncol=1, loc="upper right")
         plt.title(f"{metavar.contract}回测结果")

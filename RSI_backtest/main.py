@@ -259,6 +259,7 @@ class EnhancedRSI(bt.Strategy):
         pass
 
     def next(self):
+        # Time management
         date = bt.num2date(self.datadatetime[0]).date().isoformat()
         time = bt.num2time(self.datadatetime[0])
         trade_time = metavar.time_df.loc[date]
