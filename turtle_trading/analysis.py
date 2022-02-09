@@ -293,7 +293,7 @@ class Microscope:
 
         ax1.set_xlim([cumrets.index[0], cumrets.index[-1]])
         ax1.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
-        ax1.xaxis.set_major_locator(mdates.MonthLocator(interval=6))
+        ax1.xaxis.set_major_locator(mdates.MonthLocator(interval=5))
         ax1.yaxis.set_ticks_position("left")
         ax2.yaxis.set_ticks_position("right")
 
