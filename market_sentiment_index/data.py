@@ -28,7 +28,8 @@ def daily_msi(df):
     # dates = np.unique(df.index.date)
     df = df['S_DQ_ADJCLOSE']
     df = df.groupby(by=df.index.date).apply(msi)
-    df.to_csv('./msi.csv', index=True, index_label='Date')
+
+    return df
 
 
 def msi(p):
@@ -58,7 +59,11 @@ def msi(p):
 
 
 if __name__ == "__main__":
+    valid_contracts = ['IF00', 'IH00', 'IC00']
     path = "../data.csv"
     data = pd.read_csv(path, index_col="TRADE_DT", parse_dates=True)
-    df = create_df(data, "IF00")
-    daily_msi(df)
+
+    for contract in valid_contracts:
+        df = create_df(data, contract)
+        msi_df = daily_msi(df)
+        msi_df.to_csv(f'./{contract}_msi.csv', index=True, index_label='Date')

@@ -19,14 +19,14 @@ warnings.filterwarnings("ignore")
 class Config:
 
     data_path = os.path.abspath("../data.csv")
-    msi_path = os.path.abspath("./msi.csv")
     data = pd.read_csv(data_path, index_col="TRADE_DT", parse_dates=True)
-    msi_df = pd.read_csv(msi_path, index_col='Date', parse_dates=True)
     valid_contracts = ["IF00", "IH00", "IC00"]
-    contract = valid_contracts[0]
+    contract = valid_contracts[1]
+    msi_path = os.path.abspath(f"./{contract}_msi.csv")
+    msi_df = pd.read_csv(msi_path, index_col='Date', parse_dates=True)
 
     fromdate = datetime.date(2010, 4, 16)
-    todate = datetime.date(2012, 12, 31)
+    todate = datetime.date(2021, 12, 31)
 
     startcash = 10_000_000
     ctp_comm = 3.45 / 10000
@@ -37,8 +37,8 @@ class Config:
 
     def __init__(self):
         self.df = self.create_df(self.data, self.contract)
+        self.df = self.add_msi(self.msi_df, self.df)
         self.time_df = self.create_timedf(self.data)
-        self.msi_df = self.add_msi(self.msi_df, self.df)
         self.mult = self.set_mult()
         self.margin = self.set_margin()
 
@@ -74,12 +74,12 @@ class Config:
     
     def add_msi(self, msi, data):
         """Add daily msi column to dataframe"""
-        output = data.copy()
+        out = data.copy()
         for date, today_msi in msi.iterrows():
             date = date.date().isoformat()
-            output.loc[date]['msi'] = float(today_msi)
+            out.loc[date, 'msi'] = float(today_msi)
         
-        return output
+        return out
 
     def set_margin(self):
         # 保证金设置
@@ -88,7 +88,7 @@ class Config:
         elif self.contract == "IF00":
             return 0.12
 
-        raise TypeError("Unvalid contract name")
+        raise Exception("Unvalid contract name")
 
     def set_mult(self):
         # 乘数设置
@@ -97,7 +97,7 @@ class Config:
         elif self.contract == "IC00":
             return 200.0
 
-        raise TypeError("Unvalid contract name")
+        raise Exception("Unvalid contract name")
 
 
 metavar = Config()
@@ -105,6 +105,7 @@ metavar = Config()
 
 class DataInput(bt.feeds.PandasData):
 
+    lines = ('msi',)
     params = (
         ("nullvalue", np.nan),
         ("fromdate", metavar.fromdate),
@@ -114,6 +115,7 @@ class DataInput(bt.feeds.PandasData):
         ("high", 1),
         ("low", 2),
         ("close", 3),
+        ('msi', 4),  # market sentiment index
         ("volume", -1),
         ("openinterest", -1),
     )
@@ -170,45 +172,30 @@ class MyCommInfo(bt.CommInfoBase):
         return price * self.p.mult * self.p.margin
 
 
-# class Drawdown(bt.Indicator):
-#     """价格序列在某一时间点的最大回撤"""
-
-#     lines = ('dd', 'rev_dd')
-#     params = ('period', 50)
-
-#     def __init__(self):
-#         self.dataclose = self.datas[0].close
-#         self.hh = bt.ind.Highest(self.dataclose(0), period=self.p.period)
-#         self.ll = bt.ind.Lowest(self.dataclose(0), period=self.p.period)
-
-#     def next(self):
-#         self.lines.dd[0] = (self.hh - self.dataclose[0]) / self.dataclose[0]
-#         self.lines.rev_dd[0] = -(self.ll - self.dataclose[0]) / self.dataclose[0]
-
-
 class MyStrats(bt.Strategy):
 
     params = (
         ("period", 50),
         ("stop_limit", 0.005),
         ("msi_threshold", 9 / 10000),
-        ("target_percent", 0.15),
+        ("target_percent", 0.10),
     )
 
     def __init__(self):
         self.dataopen = self.datas[0].open
         self.dataclose = self.datas[0].close
         self.datadatetime = self.datas[0].datetime
+        self.datamsi = self.datas[0].msi
 
         self.order = None
         self.open_price = None
         self.buy_price = None
         self.sell_price = None
 
-        # 交易信号
+        self.open_bar = 1
 
     def log(self, txt, dt=None):
-        dt = dt or self.datadatetime.date(0)
+        dt = dt or self.datadatetime.datetime(0)
         print(f"{dt} - {txt}")
 
     def notify_order(self, order):
@@ -270,20 +257,18 @@ class MyStrats(bt.Strategy):
         time = bt.num2time(self.datadatetime[0])
         trade_time = metavar.time_df.loc[date]
         open_time = trade_time[0]
-        close_time = trade_time[-2]  # 使用收盘时间前一个bar作为平今仓信号
+        close_time = [trade_time[-2], trade_time[-1]]  # 使用收盘时间前一个bar作为平今仓信号
 
         # 当日开盘价
         if time == open_time:
             self.open_price = self.dataopen[0]
+            self.open_bar = len(self)
 
-        # 计算市场平稳度区间
-        interval = datetime.timedelta(minutes=self.p.period)
-        obs_period = (datetime.datetime.combine(datetime.date.today(), open_time) + interval).time()
-
-        # 当日平稳度
-        today_msi = metavar.msi_df.loc[date].values
-
-        bypass_conds = [self.order, time < obs_period, today_msi > self.p.msi_threshold]
+        bypass_conds = [
+            self.order,  # 订单正在进行中
+            len(self) < self.open_bar + self.p.period - 1,  # 平稳度观测区间
+            self.datamsi[0] > self.p.msi_threshold  # 市场不平稳
+            ]
         if any(bypass_conds):
             return
 
@@ -292,16 +277,19 @@ class MyStrats(bt.Strategy):
         shortsig = self.dataclose[0] < self.open_price
 
         metavar.is_ctp = False
-        if not self.position and time != close_time:
-            if longsig:
-                self.order = self.order_target_percent(target=self.p.target_percent)
-            elif shortsig:
-                self.order = self.order_target_percent(target=-self.p.target_percent)
+        if not self.position:
+            if time not in  close_time:  # 临近收盘不建仓
+                if longsig:
+                    self.order = self.order_target_percent(target=self.p.target_percent)
+                elif shortsig:
+                    self.order = self.order_target_percent(target=-self.p.target_percent)
         else:
             # 平今仓
-            if time == close_time:
+            if time == close_time[-2]:
                 metavar.is_ctp = True
                 self.order =  self.close()
+                self.order.addinfo(name="CLOSE AT THE END OF THE DAY")
+                return
 
             # 止损
             if self.position.size > 0:
@@ -317,15 +305,6 @@ class MyStrats(bt.Strategy):
 
     def stop(self):
         pass
-
-    def msi(self, prices):
-        mdd = [np.max((prices[: i + 1] - prices[i]) / prices[: i + 1]) for i in range(len(prices))]
-        rev_mdd = [-np.min((prices[: i + 1] - prices[i]) / prices[: i + 1]) for i in range(len(prices))]
-
-        avg_mdd = np.mean(mdd)
-        avg_rev_mdd = np.mean(rev_mdd)
-
-        return min(avg_mdd, avg_rev_mdd)
 
 
 def normal_analysis(strats):
@@ -348,6 +327,8 @@ def normal_analysis(strats):
     num_years = metavar.todate.year - metavar.fromdate.year
     ann_rets = (1 + cumrets[-1]) ** (1 / num_years) - 1
     max_drawdown = emp.max_drawdown(rets)
+
+    summary = pyf.create_simple_tear_sheet(rets)
 
     # 夏普比率
     yearly_trade_times = rets.shape[0] / num_years
@@ -378,6 +359,7 @@ def normal_analysis(strats):
     results_df = pd.Series(results_dict)
     print(results_df)
     print(perf_df)
+    print(summary)
 
 
 def opt_analysis(results):
@@ -455,5 +437,5 @@ def run():
 
 
 if __name__ == "__main__":
-    # run()
-    print(metavar.msi_df)
+    run()
+    # print(metavar.df)

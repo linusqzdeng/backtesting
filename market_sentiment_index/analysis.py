@@ -197,7 +197,7 @@ def plot_month_rets_heatmap(monthly_rets):
     fig, ax = plt.subplots(figsize=figsize)
     values = monthly_rets.values  # np.array of the monthly returns
 
-    ax = sns.heatmap(monthly_rets, cmap="Blues", cbar=True)
+    ax = sns.heatmap(monthly_rets, cmap="Blues", cbar=True, vmin=-0.05, vmax=0.1)
 
     # make sure the annot is in the center of the block
     # while also in a percentage format
