@@ -289,7 +289,8 @@ class Microscope:
                 grid=False, label='价格曲线',
                 alpha=0.7, color='grey', linewidth=2,
                 )
-        # ax1 = plt.plot(data=cumrets, color='brown', label='净值曲线')
+        # ax1.xaxis.set_major_locator(mdates.MonthLocator(bymonth=(1, 6)))
+        # ax1.xaxis.set_minor_locator(mdates.MonthLocator(interval=1))
 
         # drawdown and prices
         ax2 = ax1.twinx()
@@ -297,9 +298,6 @@ class Microscope:
 
         ax1.yaxis.set_ticks_position("left")
         ax2.yaxis.set_ticks_position("right")
-
-        # ax3 = ax1.twiny()
-        # ax3.spines['right'].set_position(('outward', 60))  # outer axis
 
         ax1.set_xlabel("日期")
         ax1.set_ylabel("净值")

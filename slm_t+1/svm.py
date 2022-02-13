@@ -1,6 +1,6 @@
 # !/usr/bin/env/python3
 # -*- coding: UTF-8 -* -
-# Created on: 2022-01-10 10:44
+# Created on: 2022-01-24 10:57
 # Tested by: python 3.8.10
 # Author: @Qizhong Deng
 
@@ -15,14 +15,6 @@ import datetime
 
 
 class Config:
-
-    # 上证综指
-    # train_data = pd.read_csv(
-            # os.path.abspath('./SSE_index.csv'),
-            # delimiter=';',
-            # index_col='date',
-            # parse_dates=True
-            # )
 
     # 三大指数
     train_data = pd.read_csv(
