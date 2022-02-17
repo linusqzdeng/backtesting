@@ -68,11 +68,18 @@ class Microscope:
         prices_df: Prices dataframe with the same timeframe
         """
         fromdate, todate = timereturn.index[0].date().isoformat(), timereturn.index[-1].date().isoformat()
-        prices_df = prices_df.loc[fromdate:todate]['S_DQ_ADJCLOSE']
-        prices_rets = emp.simple_returns(prices_df)
-        prices_cumrets = emp.cum_returns(prices_rets, starting_value=1)
 
-        return prices_cumrets
+        all_rets = []
+        for df in prices_df:
+            df = df.loc[fromdate:todate]['S_DQ_ADJCLOSE']
+            rets = emp.simple_returns(df)
+            cumrets = emp.cum_returns(rets, starting_value=starting_value)
+            all_rets.append(cumrets)
+        
+        merge_df = pd.DataFrame(all_rets).T
+        avg_rets = merge_df.mean(axis=1)
+
+        return avg_rets
         
     def sep_month_and_year(self, df):
         df['year'] = df.index.year
@@ -226,7 +233,7 @@ class Microscope:
         plt.title('年化收益率', fontsize=14)
         fig.tight_layout()
 
-        plt.savefig(f'./images/{metavar.contract}rets_mdd_calmar.png')
+        plt.savefig(f'./images/all_contracts_rets_mdd_calmar.png')
         plt.show()
 
     def plot_month_rets_heatmap(self, monthly_rets):
@@ -260,7 +267,7 @@ class Microscope:
         plt.title('月度收益率', fontsize=14)
         fig.tight_layout()
 
-        plt.savefig(f'./images/{metavar.contract}month_rets_heatmap.png')
+        plt.savefig(f'./images/all_contracts_month_rets_heatmap.png')
         plt.show()
 
     def plot_cumrets_dd_prices(self, cumrets, dd, prices):
@@ -307,11 +314,11 @@ class Microscope:
         # h3, l3 = ax3.get_legend_handles_labels()
 
         plt.legend(h1 + h2, l1 + l2, fontsize=12, ncol=1, loc="upper right")
-        plt.title(f"{metavar.contract}回测结果")
+        plt.title(f"多品种海龟交易策略")
         plt.margins(x=0)
         fig.tight_layout()
 
-        plt.savefig(f'./images/{metavar.contract}rets_dd_prices.png')
+        plt.savefig(f'./images/all_contracts_rets_dd_prices.png')
         plt.show()
 
 
@@ -322,7 +329,7 @@ if __name__ == '__main__':
     rets_df = rets_df.rename(columns={'Unnamed: 0': 'Date', '0': 'timereturn'})
     rets_df.set_index('Date', inplace=True)
     rets_df.index = pd.to_datetime(rets_df.index)
-    prices_df = metavar.df
+    prices_df = [metavar.if00, metavar.ih00, metavar.ic00]
 
     ind = Microscope(rets_df, prices_df)
     

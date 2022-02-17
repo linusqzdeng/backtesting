@@ -12,6 +12,8 @@ import pyfolio as pyf
 import datetime
 import os, sys
 import warnings
+from collections import defaultdict
+from comminfo import IFCommInfo, IHCommInfo, ICCommInfo
 
 warnings.filterwarnings("ignore")
 
@@ -23,7 +25,7 @@ class Config:
     contract = valid_contracts[0]
 
     # 回测区间
-    fromdate = datetime.date(2010, 1, 1)
+    fromdate = datetime.date(2015, 4, 16)
     todate = datetime.date(2021, 12, 31)
     filepath = os.path.abspath("../data.csv")
     data = pd.read_csv(filepath, index_col="TRADE_DT", parse_dates=True)
@@ -31,23 +33,23 @@ class Config:
     # 交易参数
     stamp_duty = 0.001
     commission = 0.23 / 10000
-    startcash = 10_000_000
+    mult = 300
+    margin = 0.12
+    startcash = 10_000_000 * 3
 
     def __init__(self):
         # 数据处理
-        self.df = self.create_df(self.data, self.contract, "daily")
-        self.first_days = self.get_firstday(self.df)  # keep records for the first day of the year
+        self.if00 = self.create_df(self.data, self.valid_contracts[0], 'daily')
+        self.ih00 = self.create_df(self.data, self.valid_contracts[1], 'daily')
+        self.ic00 = self.create_df(self.data, self.valid_contracts[2], 'daily')
+        self.first_days = self.get_firstday(self.if00)  # keep records for the first day of the year
 
-        # 根据合约更改保证金和乘数
-        self.mult = self.set_mult()
-        self.margin = self.set_margin()
-
-    def create_df(self, raw_df, contract, freq):
+    def create_df(self, data, contract, freq):
         """
         Convert the raw .csv file into the target
         dataframe with specified frequency
         """
-        df = raw_df[raw_df["S_INFO_CODE"] == contract]
+        df = data[data["S_INFO_CODE"] == contract]
         df.index = pd.to_datetime(df.index)
 
         adj_cols = [
@@ -111,7 +113,7 @@ metavar = Config()
 class Logger:
     """将打印出的交易单保存为log文件"""
 
-    savepath = f"./logs/{metavar.contract}trades.log"
+    savepath = f"./logs/multi_contracts.log"
 
     def __init__(self, filename=savepath):
         self.terminal = sys.stdout
@@ -125,7 +127,7 @@ class Logger:
         pass
 
 
-class StockIndex(bt.feeds.PandasData):
+class DataInput(bt.feeds.PandasData):
     params = (
         ("nullvalue", np.nan),
         ("fromdate", metavar.fromdate),
@@ -140,6 +142,56 @@ class StockIndex(bt.feeds.PandasData):
     )
 
 
+class DonchianChannels(bt.Indicator):
+    '''
+    Params Note:
+      - `lookback` (default: -1)
+        If `-1`, the bars to consider will start 1 bar in the past and the
+        current high/low may break through the channel.
+        If `0`, the current prices will be considered for the Donchian
+        Channel. This means that the price will **NEVER** break through the
+        upper/lower channel bands.
+    Refers to: https://www.backtrader.com/recipes/indicators/donchian/donchian/
+    '''
+
+    alias = ('DCH', 'DonchianChannel',)
+    lines = ('dcm', 'dch', 'dcl',)  # dc middle, dc high, dc low
+    params = (
+        ('period', 20),  # default value (could be modified)
+        ('lookback', -1),  # consider current bar or not
+    )
+
+    def __init__(self):
+        hi, lo = self.data.high, self.data.low
+        if self.p.lookback:  # move backwards as needed
+            hi, lo = hi(self.p.lookback), lo(self.p.lookback)
+
+        self.l.dch = bt.ind.Highest(hi, period=self.p.period)
+        self.l.dcl = bt.ind.Lowest(lo, period=self.p.period)
+        self.l.dcm = (self.l.dch + self.l.dcl) / 2.0  # avg of the above
+
+
+class TurtleSizer(bt.Sizer):
+
+    params = (
+        ("theta", 0.01),
+    )
+
+    def _getsizing(self, comminfo, cash, data, isbuy):
+        # 最大保证金约束
+        available_margin = self.strategy.available_margin[data]
+        price = self.strategy.dataclose[data][0]
+        max_size = available_margin // (price * comminfo.p.mult * comminfo.p.margin)
+
+        # 真实波动率约束
+        atr = self.strategy.atr[data][0]
+        abs_vol = atr * comminfo.p.mult  # N * CN
+        current_value = self.broker.get_value([data]) + self.strategy.start_value[data]
+        atr_size = (current_value * self.p.theta) // abs_vol  # 1 unit 
+
+        return min(max_size, atr_size)
+
+
 class Turtle(bt.Strategy):
     """Turtle trading system"""
 
@@ -147,60 +199,79 @@ class Turtle(bt.Strategy):
         ("s1_longperiod", 20),
         ("s1_shortperiod", 10),
         ("s2_longperiod", 55),
-        ("s2_shortperiod", 15),
+        ("s2_shortperiod", 20),
+        ("is_s1", True),
         ("bigfloat", 6),
         ("drawback", 1),
         ("closeout", 2),
-        ("max_add", 3),
+        ("max_pos", 6),
         ("theta", 0.01),
     )
 
     def __init__(self):
-        self.dataclose = self.datas[0].close
-        self.dataopen = self.datas[0].open
-        self.datahigh = self.datas[0].high
-        self.datalow = self.datas[0].low
-        self.datadatetime = self.datas[0].datetime
+        # s1 or s2
+        if self.p.is_s1:
+            longperiod = self.p.s1_longperiod
+            shortperiod = self.p.s1_shortperiod
+        else:
+            longperiod = self.p.s2_longperiod
+            shortperiod = self.p.s2_shortperiod
 
         # if True, ignore the next 20days breakthrough
         # look for a 55days breakthrough
         self.ignore = False
 
-        # 突破通道
-        self.s1_long_h = bt.ind.Highest(self.datahigh(-1), period=self.p.s1_longperiod)
-        self.s1_long_l = bt.ind.Lowest(self.datalow(-1), period=self.p.s1_longperiod)
-        self.s1_short_h = bt.ind.Highest(self.datahigh(-1), period=self.p.s1_shortperiod)
-        self.s1_short_l = bt.ind.Lowest(self.datalow(-1), period=self.p.s1_shortperiod)
-        self.s1_longsig = bt.ind.CrossOver(self.dataclose(0), self.s1_long_h)
-        self.s1_shortsig = bt.ind.CrossOver(self.s1_long_l, self.dataclose(0))
-        self.s1_longexit = bt.ind.CrossOver(self.s1_short_l, self.dataclose(0))
-        self.s1_shortexit = bt.ind.CrossOver(self.dataclose(0), self.s1_short_h)
+        self.donchian_long = {}
+        self.donchian_short = {}
+        self.dataopen = defaultdict(lambda: 0)
+        self.datahigh = defaultdict(lambda: 0)
+        self.datalow = defaultdict(lambda: 0)
+        self.dataclose = defaultdict(lambda: 0)
+        self.longsig = defaultdict(lambda: 0)
+        self.shortsig = defaultdict(lambda: 0)
+        self.longexit = defaultdict(lambda: 0)
+        self.shortexit = defaultdict(lambda: 0)
+        self.atr = defaultdict(lambda: 0)
+        for d in self.datas:
+            # 突破通道
+            long_channel = DonchianChannels(d, period=longperiod)
+            short_channel = DonchianChannels(d, period=shortperiod)
+            self.donchian_long[d], self.donchian_short[d] = {}, {}
+            self.donchian_long[d]['hh'] = long_channel.dch  # highest high
+            self.donchian_long[d]['ll'] = long_channel.dcl  # lowest low
+            self.donchian_short[d]['hh'] = short_channel.dch
+            self.donchian_short[d]['ll'] = short_channel.dcl
 
-        self.s2_long_h = bt.ind.Highest(self.datahigh(-1), period=self.p.s2_longperiod)
-        self.s2_long_l = bt.ind.Lowest(self.datalow(-1), period=self.p.s2_longperiod)
-        self.s2_short_h = bt.ind.Highest(self.datahigh(-1), period=self.p.s2_shortperiod)
-        self.s2_short_l = bt.ind.Lowest(self.datalow(-1), period=self.p.s2_shortperiod)
-        self.s2_longsig = bt.ind.CrossOver(self.dataclose(0), self.s2_long_h)
-        self.s2_shortsig = bt.ind.CrossOver(self.s2_long_l, self.dataclose(0))
-        self.s2_longexit = bt.ind.CrossOver(self.s2_short_l, self.dataclose(0))
-        self.s2_shortexit = bt.ind.CrossOver(self.dataclose(0), self.s2_short_h)
+            # ohlc
+            self.dataopen[d] = d.open
+            self.datahigh[d] = d.high
+            self.datalow[d] = d.low
+            self.dataclose[d] = d.close
+
+            # 交易信号
+            self.longsig[d] = bt.ind.CrossUp(self.dataclose[d](0), self.donchian_long[d]['hh'])
+            self.shortsig[d] = bt.ind.CrossDown(self.dataclose[d](0), self.donchian_long[d]['ll'])
+            self.longexit[d] = bt.ind.CrossDown(self.dataclose[d](0), self.donchian_short[d]['ll'])
+            self.shortexit[d] = bt.ind.CrossUp(self.dataclose[d](0), self.donchian_short[d]['hh'])
+
+            # atr
+            self.atr[d] = bt.ind.ATR(d, period=20)
+
 
         # 头寸管理
-        self.tr = bt.ind.TR(self.datas[0])
-        self.atr = bt.ind.ATR(self.datas[0], period=20)
-        self.pos_count = 0
-        self.margin_used = 0
-        self.max_margin = metavar.startcash * 0.2
-        self.start_value = metavar.startcash
-        self.ann_profit = 0
+        self.pos_count = defaultdict(lambda: 0)
+        self.margin_used = defaultdict(lambda: 0)
+        self.max_margin = defaultdict(lambda: metavar.startcash * 0.4)
+        self.start_value = defaultdict(lambda: metavar.startcash / 3)  # 10m each
+        self.available_margin = defaultdict(lambda: 0)
 
-        self.curpos = 0
-        self.buyprice = None
-        self.sellprice = None
-        self.order = None
+        # 订单管理
+        self.buyprice = defaultdict(lambda: None)
+        self.sellprice = defaultdict(lambda: None)
+        self.order = defaultdict(lambda: None)
 
     def log(self, txt, dt=None):
-        dt = dt or self.datadatetime.date(0)
+        dt = dt or self.datetime.date(0)
         print(f"{dt} - {txt}")
 
     def notify_order(self, order):
@@ -210,42 +281,46 @@ class Turtle(bt.Strategy):
 
         # 处理已完成订单
         if order.status == order.Completed:
+            # Basic info of current order
+            dt, dn = self.datetime.date(), order.data._name
+            mult = order.comminfo.p.mult
+            margin = order.comminfo.p.margin
+
             # 保证金占用
-            margin_used = order.executed.price * abs(order.executed.size) * metavar.mult * metavar.margin
-            self.margin_used += margin_used
-            self.margin_pct = self.margin_used / self.broker.get_value()
+            margin_used = order.executed.price * abs(order.executed.size) * mult * margin
+            self.margin_used[order.data] += margin_used
 
             if order.isbuy():
                 self.log(
-                    "LONG CREATED @ {:.2f}, EXECUTED @ {:.2f}, SIZE {}, COST {:.2f}, COMMISSION {:.2f}, MARGIN {:.2f}, TT_MARGIN {:.2%}, CURPOS {}".format(
+                    "LONG CREATED FOR {}, @ {:.2f}, EXECUTED @ {:.2f}, SIZE {}, COST {:.2f}, COMMISSION {:.2f}, MARGIN {:.2f}, CURPOS {}".format(
+                        dn,
                         order.created.price,
                         order.executed.price,
                         order.executed.size,
                         order.executed.value,
                         order.executed.comm,
                         margin_used,
-                        self.margin_pct,
-                        self.position.size,
+                        self.getposition(order.data).size,
                     )
                 )
 
-                self.buyprice = order.executed.price
+                self.buyprice[order.data] = order.executed.price
 
             elif order.issell():
                 self.log(
-                    "SHORT CREATED @ {:.2f}, EXECUTED @ {:.2f}, SIZE {}, COST {:.2f}, COMMISSION {:.2f}, MARGIN {:.2f}, TT_MARGIN {:.2%}, CURPOS {}".format(
+                    "SHORT FOR {}, CREATED @ {:.2f}, EXECUTED @ {:.2f}, SIZE {}, COST {:.2f}, COMMISSION {:.2f}, MARGIN {:.2f}, CURPOS {}".format(
+                        dn,
                         order.created.price,
                         order.executed.price,
                         order.executed.size,
                         order.executed.value,
                         order.executed.comm,
                         margin_used,
-                        self.margin_pct,
-                        self.position.size,
+                        self.getposition(order.data).size,
                     )
                 )
 
-                self.sellprice = order.executed.price
+                self.sellprice[order.data] = order.executed.price
 
             if order.info:
                 self.log(f"**INFO** {order.info['name']}")
@@ -256,13 +331,13 @@ class Turtle(bt.Strategy):
         elif order.status in [order.Canceled, order.Margin, order.Rejected]:
             self.log(f"ORDER CANCELED/MARGIN/REJECTED **CODE** {order.getstatusname()}")
 
-        self.order = None
+        self.order[order.data] = None
 
     def notify_trade(self, trade):
         if not trade.isclosed:
             return
 
-        self.log(f"OPERATION PROFIT {trade.pnl:.2f}, NET PROFIT {trade.pnlcomm:.2f}")
+        self.log(f"OPERATION FOR {trade.data._name} PROFIT {trade.pnl:.2f}, NET PROFIT {trade.pnlcomm:.2f}")
 
     def start(self):
         pass
@@ -271,178 +346,112 @@ class Turtle(bt.Strategy):
         pass
 
     def next(self):
-        self.log(
-            "HH {:.2f}, LL {:.2f}, OPEN {:.2f}, CLOSE {:.2f}, VALUE {:.2f}, CASH {:.2f}".format(
-                self.s2_long_h[-1],
-                self.s2_long_l[-1],
-                self.dataopen[0],
-                self.dataclose[0],
-                self.broker.get_value(),
-                self.broker.get_cash(),
-            )
+        # Loop through each asset
+        for i, d in enumerate(self.datas):
+            # 计算年内净值变动
+            dt, dn = self.datetime.date().isoformat(), d._name
+            self.reset_margin_and_startvalue(d, dt)
+            self.available_margin[d] = self.cal_available_margin(d)
+            pos = self.getposition(d).size
 
-        )
-        
-        # 计算年内净值变动
-        today = bt.num2date(self.datadatetime[0]).date().isoformat()
-        self.ann_profit = self.cal_ann_profit(today)
-        self.margin_used = self.reset_margin(today)
-        self.max_margin = self.cal_max_margin(self.ann_profit)
-
-        # 跳过当前bar的条件
-        bypass_conds = [
-            self.order,
-            len(self) < self.p.s1_longperiod,
-            self.margin_used >= self.max_margin
-            ]
-        if any(bypass_conds):
-            return
-
-        # if not self.ignore:
-        # longsig = self.s1_longsig
-        # shortsig = self.s1_shortsig
-        # longexit = self.s1_longexit
-        # shortexit = self.s1_shortexit
-        # else:
-        # longsig = self.s2_longsig
-        # shortsig = self.s2_shortsig
-        # longexit = self.s2_longexit
-        # shortexit = self.s2_shortexit
-
-        # # only use s2 system
-        longsig = self.s2_longsig
-        shortsig = self.s2_shortsig
-        longexit = self.s2_longexit
-        shortexit = self.s2_shortexit
-
-        size = self.get_size(self.max_margin, self.margin_used, self.dataclose[0])
-
-        if not self.position:
-            # 通道突破
-            if longsig > 0:
-                self.order = self.buy(size=size)
-            elif shortsig > 0:
-                self.order = self.sell(size=size)
-
-        else:
-            # 大趋势判断
-            # 若存在正向大趋势，执行紧缩性平仓
-            uptrend = self.datahigh[-1] - self.buyprice > self.p.bigfloat * self.atr[0] if self.buyprice else False
-            downtrend =  self.sellprice - self.datahigh[-1] < -self.p.bigfloat * self.atr[0] if self.sellprice else False
-            if uptrend or downtrend:
-                stop_limit = self.p.drawback
+            if not pos and not self.order.get(d, None):
+                if self.longsig[d]:
+                    self.order[d] = self.buy(data=d)
+                    self.pos_count[d] += 1
+                elif self.shortsig[d]:
+                    self.order[d] = self.sell(data=d)
+                    self.pos_count[d] += 1
             else:
-                stop_limit = self.p.closeout
+                # 大趋势判断: 若存在正向大趋势，执行紧缩性平仓
+                if self.is_trend(d):
+                    stop_limit = self.p.drawback
+                else:
+                    stop_limit = self.p.closeout
 
-            if self.position.size > 0:
-                price_change = self.dataclose[0] - self.buyprice
+                if pos > 0:
+                    price_change = self.dataclose[d][0] - self.buyprice[d]
 
-                # 多头加仓
-                if (price_change >= 0.5 * self.atr[0]) and (self.pos_count < self.p.max_add):
-                    self.order = self.buy(size=size)
-                    self.pos_count += 1
+                    # 多头加仓
+                    if (price_change >= 0.5 * self.atr[d][0]) and (sum(self.pos_count.values()) < self.p.max_pos):
+                        self.order[d] = self.buy(data=d)
 
-                # 多头平仓
-                if longexit > 0:  # 赢利性退场
-                    self.order = self.close()
-                    self.order.addinfo(name='WINNER CLOSE')
-                    self.pos_count = 0
-                    self.ignore = True
-                    self.margin_used = 0
-                elif price_change <= -stop_limit * self.atr[0]:  # 亏损性退场
-                    self.order = self.close()
-                    self.order.addinfo(name='LOSER CLOSE')
-                    self.pos_count = 0
-                    self.ignore = False
-                    self.margin_used = 0
+                        if self.order[d] is not None:  # size != 0
+                            self.pos_count[d] += 1
+                            self.order[d].addinfo(name=f'LONG POSITION ADDED FOR {dn}, TOTAL POS ADD {self.pos_count[d]}')
 
-            else:
-                price_change = self.dataclose[0] - self.sellprice
+                    # 多头平仓
+                    if self.longexit[d] > 0:  # 赢利性退场
+                        self.order[d] = self.close(data=d)
+                        self.order[d].addinfo(name=f'WINNER CLOSE FOR {dn}')
+                        self.pos_count[d] = 0
+                        self.margin_used[d] = 0
+                    elif price_change <= -stop_limit * self.atr[d][0]:  # 亏损性退场
+                        self.order[d] = self.close(data=d)
+                        self.order[d].addinfo(name=f'LOSER CLOSE FOR {dn}')
+                        self.pos_count[d] = 0
+                        self.margin_used[d] = 0
 
-                # 空头加仓
-                if (price_change <= -0.5 * self.atr[0]) and (self.pos_count < self.p.max_add):
-                    self.order = self.sell(size=size)
-                    self.pos_count += 1
+                else:
+                    price_change = self.dataclose[d][0] - self.sellprice[d]
 
-                # 空头平仓
-                if shortexit > 0:  # 赢利性退场
-                    self.order = self.close()
-                    self.order.addinfo(name='WINNER CLOSE')
-                    self.pos_count = 0
-                    self.ignore = True
-                    self.margin_used = 0
-                elif price_change >= stop_limit * self.atr[0]:  # 亏损性退场
-                    self.order = self.close()
-                    self.order.addinfo(name='LOSER CLOSE')
-                    self.pos_count = 0
-                    self.ignore = False
-                    self.margin_used = 0
+                    # 空头加仓
+                    if (price_change <= -0.5 * self.atr[d][0]) and (sum(self.pos_count.values()) < self.p.max_pos):
+                        self.order[d] = self.sell(data=d)
+                        if self.order[d] is not None:  # size != 0
+                            self.pos_count[d] += 1
+                            self.order[d].addinfo(name=f'SHORT POSITION ADDED FOR {dn}, TOTAL POS ADD {self.pos_count[d]}')
+
+                    # 空头平仓
+                    if self.shortexit[d] > 0:  # 赢利性退场
+                        self.order[d] = self.close(data=d)
+                        self.order[d].addinfo(name=f'WINNER CLOSE FOR {dn}')
+                        self.pos_count[d] = 0
+                        self.margin_used[d] = 0
+                    elif price_change >= stop_limit * self.atr[d][0]:  # 亏损性退场
+                        self.order[d] = self.close(data=d)
+                        self.order[d].addinfo(name=f'LOSER CLOSE FOR {dn}')
+                        self.pos_count[d] = 0
+                        self.margin_used[d] = 0
 
     def stop(self):
         pass
 
-    def get_size(self, max_margin, margin_used, price):
-        """Calculate size based on ATR"""
-        # 最大保证金约束
-        available_margin = max_margin - margin_used
-        margin_size = available_margin // (price * metavar.mult * metavar.margin)
+    def cal_available_margin(self, data):
+        """Return the maximum margin that can be used to trade"""
+        current_value = self.broker.get_value([data]) + self.start_value[data]
+        ann_nav = current_value / self.start_value[data]
 
-        # 真是波动率约束
-        n = self.atr[0]
-        abs_vol = n * metavar.mult  # N * CN
-        atr_size = (self.broker.get_value() * self.p.theta) // abs_vol  # 1 unit
-
-        return min(atr_size, margin_size)
-    
-    def cal_ann_profit(self, date):
-        """计算每年的净值变动"""
-        if date in metavar.first_days:
-            self.start_value = self.broker.get_value()
-
-        return self.broker.get_value() / self.start_value
-    
-    def reset_margin(self, date):
-        """重制每年保证金占用"""
-        if date in metavar.first_days:
-            self.margin_used = 0
-        
-        return self.margin_used
-
-    def cal_max_margin(self, ann_profit):
-        """根据净值范围调整最大保证金比例"""
-        if ann_profit >= 1.1:
+        if ann_nav >= 1.1:
             max_pct = 0.50
-        elif 1.1 > ann_profit >= 1:
+        elif 1.1 > ann_nav >= 1:
             max_pct = 0.40
-        elif 1 > ann_profit >= 0.95:
+        elif 1 > ann_nav >= 0.95:
             max_pct = 0.30
         else:
             max_pct = 0.10
 
-        return max_pct * self.broker.get_value()
+        self.max_margin[data] = max_pct * (self.broker.get_value([data]) + self.start_value[data]) 
+        available_margin = self.max_margin[data] - self.margin_used[data]
 
+        return available_margin
+    
+    def reset_margin_and_startvalue(self, data, date):
+        """Record the margin and start value of each asset at the year start"""
+        if date in metavar.first_days:
+            self.margin_used[data] = 0
+            self.start_value[data] += self.broker.get_value([data])
+    
+    def is_trend(self, data):
+        """Return True if the current movement of price strike the 'bigfloat' trend"""
+        high = self.datahigh[data]
+        buyprice = self.buyprice[data]
+        sellprice = self.sellprice[data]
+        atr = self.atr[data]
 
-class FurCommInfo(bt.CommInfoBase):
-    """定义期货的交易手续费和佣金"""
+        uptrend = high[-1] - buyprice > self.p.bigfloat * atr[0] if buyprice else False
+        downtrend = sellprice - high[-1] < -self.p.bigfloat * atr[0] if sellprice else False
 
-    params = (
-        ("stocklike", False),
-        ("commtype", bt.CommInfoBase.COMM_PERC),  # 按比例收取手续费
-        ("percabs", True),  # 0.0002 = 0.2%
-        ("commission", metavar.commission),
-        ("mult", metavar.mult),
-        ("stamp_duty", metavar.stamp_duty),  # 印花税0.1%
-        ("margin", metavar.margin),
-        ("backtest_margin", 1.0),  # no leverage
-    )
-
-    def _getcommission(self, size, price, pseudoexec):
-        """手续费=买卖手数*合约价格*手续费比例*合约乘数"""
-        return abs(size) * price * self.p.commission * self.p.mult
-
-    def get_margin(self, price):
-        """每笔交易保证金=合约价格*合约乘数*保证金比例"""
-        return price * self.p.mult * self.p.margin
+        return any([uptrend, downtrend])
 
 
 def run():
@@ -452,29 +461,25 @@ def run():
     cerebro = bt.Cerebro()
     cerebro.addstrategy(Turtle)
 
-    data = StockIndex(dataname=metavar.df)
-    cerebro.adddata(data)
+    # Add datafeeds and comminfos
+    datalist = [
+        (metavar.if00, IFCommInfo(), 'if00'),
+        (metavar.ih00, IHCommInfo(), 'ih00'),
+        (metavar.ic00, ICCommInfo(), 'ic00')
+    ]
+    for df, comminfo, name in datalist:
+        data = DataInput(dataname=df)
+        cerebro.adddata(data, name=name)
+        cerebro.broker.addcommissioninfo(comminfo, name=name)
 
     cerebro.broker.setcash(metavar.startcash)
-    comminfo = FurCommInfo()
-    cerebro.broker.addcommissioninfo(comminfo)
-    # cerebro.addsizer(TurtleSizer)
+    cerebro.addsizer(TurtleSizer)
 
     # Analysers
     cerebro.addanalyzer(bt.analyzers.TimeReturn, _name="_TimeReturn")
     cerebro.addanalyzer(bt.analyzers.PyFolio, _name="pyfolio")
 
     # Backtesting
-    init_msg = f"""
-            回测对象: {metavar.contract}
-            起始时间: {metavar.fromdate}
-            终止时间: {metavar.todate}
-            合约点值: {metavar.mult}
-            最低保证金: {metavar.margin}
-            开仓/平仓手续费: {0.23 / 10000:.4%}
-            """
-
-    print(init_msg)
     print(f"开始资金总额 {cerebro.broker.getvalue():.2f}")
     results = cerebro.run()
     strats = results[0]
@@ -531,4 +536,3 @@ def run():
 
 if __name__ == "__main__":
     run()
-    # print(metavar.first_days)
