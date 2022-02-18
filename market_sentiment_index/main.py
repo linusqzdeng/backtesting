@@ -21,12 +21,12 @@ class Config:
     data_path = os.path.abspath("../data.csv")
     data = pd.read_csv(data_path, index_col="TRADE_DT", parse_dates=True)
     valid_contracts = ["IF00", "IH00", "IC00"]
-    contract = valid_contracts[1]
+    contract = valid_contracts[0]
     msi_path = os.path.abspath(f"./{contract}_msi.csv")
     msi_df = pd.read_csv(msi_path, index_col='Date', parse_dates=True)
 
     fromdate = datetime.date(2010, 4, 16)
-    todate = datetime.date(2021, 12, 31)
+    todate = datetime.date(2010, 4, 18)
 
     startcash = 10_000_000
     ctp_comm = 3.45 / 10000
@@ -38,7 +38,7 @@ class Config:
     def __init__(self):
         self.df = self.create_df(self.data, self.contract)
         self.df = self.add_msi(self.msi_df, self.df)
-        self.time_df = self.create_timedf(self.data)
+        self.time_df = self.create_timedf(self.df)
         self.mult = self.set_mult()
         self.margin = self.set_margin()
 
@@ -192,7 +192,7 @@ class MyStrats(bt.Strategy):
         self.buy_price = None
         self.sell_price = None
 
-        self.open_bar = 1
+        self.morning_open_bar = 1
 
     def log(self, txt, dt=None):
         dt = dt or self.datadatetime.datetime(0)
@@ -253,20 +253,24 @@ class MyStrats(bt.Strategy):
 
     def next(self):
         # Time management
-        date = bt.num2date(self.datadatetime[0]).date().isoformat()
+        date = bt.num2date(self.datadatetime[0]).date()
         time = bt.num2time(self.datadatetime[0])
-        trade_time = metavar.time_df.loc[date]
-        open_time = trade_time[0]
-        close_time = [trade_time[-2], trade_time[-1]]  # 使用收盘时间前一个bar作为平今仓信号
+        # trade_time = metavar.time_df.loc[date]
+        # open_time = trade_time[0]
+        # close_time = [trade_time[-2], trade_time[-1]]  # 使用收盘时间前一个bar作为平今仓信号
+        morning_open_time, morning_close_time, afternoon_open_time, afternoon_close_time = self.trade_time(date)
+        self.morning_close_bar = self.trade_close_bar(date, self.morning_open_bar)
+        self.afternoon_open_bar = self.morning_close_bar + 90 + 1  # 1.5h
+        self.afternoon_close_bar = self.trade_close_bar(date, self.afternoon_open_bar)
 
         # 当日开盘价
-        if time == open_time:
+        if time == morning_open_time:
             self.open_price = self.dataopen[0]
-            self.open_bar = len(self)
+            self.morning_open_bar = len(self)
 
         bypass_conds = [
             self.order,  # 订单正在进行中
-            len(self) < self.open_bar + self.p.period - 1,  # 平稳度观测区间
+            len(self) < self.morning_open_bar + self.p.period - 1,  # 平稳度观测区间
             self.datamsi[0] > self.p.msi_threshold  # 市场不平稳
             ]
         if any(bypass_conds):
@@ -278,14 +282,14 @@ class MyStrats(bt.Strategy):
 
         metavar.is_ctp = False
         if not self.position:
-            if time not in  close_time:  # 临近收盘不建仓
+            if len(self) not in [self.afternoon_close_bar, self.afternoon_close_bar - 1]:  # 临近收盘不建仓
                 if longsig:
                     self.order = self.order_target_percent(target=self.p.target_percent)
                 elif shortsig:
                     self.order = self.order_target_percent(target=-self.p.target_percent)
         else:
             # 平今仓
-            if time == close_time[-2]:
+            if len(self) == self.afternoon_close_bar - 1:
                 metavar.is_ctp = True
                 self.order =  self.close()
                 self.order.addinfo(name="CLOSE AT THE END OF THE DAY")
@@ -306,6 +310,37 @@ class MyStrats(bt.Strategy):
     def stop(self):
         pass
 
+    def trade_time(self, date):
+        """Return today's trade times in terms of current date"""
+        if not isinstance(date, datetime.date):
+            raise Exception('Please use datetime object as date refernece')
+        
+        adj_date = datetime.date(2016, 1, 4)
+        if date < adj_date:
+            morning_open_time = datetime.time(9, 16)
+            morning_close_time = datetime.time(11, 30)
+            afternoon_open_time = datetime.time(13, 1)
+            afternoon_close_time = datetime.time(15, 15)
+        else:
+            morning_open_time = datetime.time(9, 31)
+            morning_close_time = datetime.time(11, 30)
+            afternoon_open_time = datetime.time(13, 1)
+            afternoon_close_time = datetime.time(15, 00)
+        
+        return (morning_open_time, morning_close_time, afternoon_open_time, afternoon_close_time)
+    
+    def trade_close_bar(self, date, open_bar):
+        if not isinstance(date, datetime.date):
+            raise Exception('Please use datetime object as date refernece')
+        
+        ref_date = datetime.date(2016, 1, 4)
+        if date < ref_date:
+            close_bar = open_bar + 135 - 1  # 2.25h
+        else:
+            close_bar = open_bar + 120 - 1  # 2h
+        
+        return close_bar
+    
 
 def normal_analysis(strats):
     # =========== for analysis.py ============ #
@@ -438,4 +473,3 @@ def run():
 
 if __name__ == "__main__":
     run()
-    # print(metavar.df)

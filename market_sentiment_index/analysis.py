@@ -306,6 +306,21 @@ def plot_opt_results(opt_df: pd.DataFrame):
     plt.savefig("./images/opt_heatmap.png")
     plt.show()
 
+def plot_rets_hist(rets):
+    """
+    Plot the histogram of timereturns
+
+    Params
+    ------
+    rets: pd.DataFrame
+        Timereturns of the strategy
+    """
+    fig, ax = plt.subplots(figsize=figsize)
+
+    ax = plt.hist(rets.loc[:, 'timereturn'].values)
+    fig.tight_layout()
+    plt.show()
+
 
 if __name__ == "__main__":
     metavar = Config()
@@ -337,7 +352,8 @@ if __name__ == "__main__":
     prices_df = normalise_prices(rets_df, prices_df)
 
 
-    plot_annrets_mdd_calmar(ann_rets, ann_mean, ann_mdd, calmar)
-    plot_month_rets_heatmap(month_rets)
-    plot_cumrets_dd_prices(cumrets, drawdown, prices_df)
+    # plot_annrets_mdd_calmar(ann_rets, ann_mean, ann_mdd, calmar)
+    # plot_month_rets_heatmap(month_rets)
+    # plot_cumrets_dd_prices(cumrets, drawdown, prices_df)
     # plot_opt_results(opt_df)
+    plot_rets_hist(rets_df)

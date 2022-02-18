@@ -1,16 +1,16 @@
 ,0
-Annual return,0.022419958935449458
-Cumulative returns,0.15421012583399918
-Annual volatility,0.0562412373704262
-Sharpe ratio,0.4222210766027516
-Calmar ratio,0.1752296529173108
-Stability,0.5873873780361737
-Max drawdown,-0.12794614702586452
-Omega ratio,1.158655236974718
-Sortino ratio,0.7056717925741697
-Skew,2.0793657969853085
-Kurtosis,25.532312312913984
-Tail ratio,1.1127656737451919
-Daily value at risk,-0.006991498786953918
+Annual return,0.0
+Cumulative returns,0.0
+Annual volatility,
+Sharpe ratio,
+Calmar ratio,
+Stability,
+Max drawdown,0.0
+Omega ratio,
+Sortino ratio,
+Skew,0.0
+Kurtosis,-3.0
+Tail ratio,
+Daily value at risk,
 Gross leverage,0.0
-Daily turnover,inf
+Daily turnover,0.0
