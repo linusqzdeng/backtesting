@@ -189,7 +189,8 @@ class TurtleSizer(bt.Sizer):
         current_value = self.broker.get_value([data]) + self.strategy.start_value[data]
         atr_size = (current_value * self.p.theta) // abs_vol  # 1 unit 
 
-        return min(max_size, atr_size)
+        # return min(max_size, atr_size)
+        return atr_size
 
 
 class Turtle(bt.Strategy):
@@ -200,17 +201,19 @@ class Turtle(bt.Strategy):
         ("s1_shortperiod", 10),
         ("s2_longperiod", 55),
         ("s2_shortperiod", 20),
-        ("is_s1", True),
+        ("user_s1", True),
         ("bigfloat", 6),
         ("drawback", 1),
         ("closeout", 2),
-        ("max_pos", 6),
+        ("contract_max", 3),
+        ("mkt_max", 6),
+        ("dir_max", 12),
         ("theta", 0.01),
     )
 
     def __init__(self):
         # s1 or s2
-        if self.p.is_s1:
+        if self.p.user_s1:
             longperiod = self.p.s1_longperiod
             shortperiod = self.p.s1_shortperiod
         else:
@@ -236,11 +239,6 @@ class Turtle(bt.Strategy):
             # 突破通道
             long_channel = DonchianChannels(d, period=longperiod)
             short_channel = DonchianChannels(d, period=shortperiod)
-            self.donchian_long[d], self.donchian_short[d] = {}, {}
-            self.donchian_long[d]['hh'] = long_channel.dch  # highest high
-            self.donchian_long[d]['ll'] = long_channel.dcl  # lowest low
-            self.donchian_short[d]['hh'] = short_channel.dch
-            self.donchian_short[d]['ll'] = short_channel.dcl
 
             # ohlc
             self.dataopen[d] = d.open
@@ -249,19 +247,18 @@ class Turtle(bt.Strategy):
             self.dataclose[d] = d.close
 
             # 交易信号
-            self.longsig[d] = bt.ind.CrossUp(self.dataclose[d](0), self.donchian_long[d]['hh'])
-            self.shortsig[d] = bt.ind.CrossDown(self.dataclose[d](0), self.donchian_long[d]['ll'])
-            self.longexit[d] = bt.ind.CrossDown(self.dataclose[d](0), self.donchian_short[d]['ll'])
-            self.shortexit[d] = bt.ind.CrossUp(self.dataclose[d](0), self.donchian_short[d]['hh'])
+            self.longsig[d] = bt.ind.CrossUp(self.dataclose[d](0), long_channel.dch)
+            self.shortsig[d] = bt.ind.CrossDown(self.dataclose[d](0), long_channel.dcl)
+            self.longexit[d] = bt.ind.CrossDown(self.dataclose[d](0), short_channel.dcl)
+            self.shortexit[d] = bt.ind.CrossUp(self.dataclose[d](0), short_channel.dch)
 
             # atr
             self.atr[d] = bt.ind.ATR(d, period=20)
 
-
         # 头寸管理
         self.pos_count = defaultdict(lambda: 0)
         self.margin_used = defaultdict(lambda: 0)
-        self.max_margin = defaultdict(lambda: metavar.startcash * 0.4)
+        self.max_margin = defaultdict(lambda: metavar.startcash * 0.2)
         self.start_value = defaultdict(lambda: metavar.startcash / 3)  # 10m each
         self.available_margin = defaultdict(lambda: 0)
 
@@ -283,23 +280,23 @@ class Turtle(bt.Strategy):
         if order.status == order.Completed:
             # Basic info of current order
             dt, dn = self.datetime.date(), order.data._name
-            mult = order.comminfo.p.mult
-            margin = order.comminfo.p.margin
-
-            # 保证金占用
-            margin_used = order.executed.price * abs(order.executed.size) * mult * margin
-            self.margin_used[order.data] += margin_used
+            pos = self.getpositionbyname(dn).size
 
             if order.isbuy():
+                # 保证金占用
+                if pos >= 0:
+                    margin_used = order.executed.value
+                else:
+                    margin_used = -order.executed.value
+
                 self.log(
-                    "LONG CREATED FOR {}, @ {:.2f}, EXECUTED @ {:.2f}, SIZE {}, COST {:.2f}, COMMISSION {:.2f}, MARGIN {:.2f}, CURPOS {}".format(
+                    "LONG CREATED FOR {}, @ {:.2f}, EXECUTED @ {:.2f}, SIZE {}, COST {:.2f}, COMMISSION {:.2f}, CURPOS {}".format(
                         dn,
                         order.created.price,
                         order.executed.price,
                         order.executed.size,
                         order.executed.value,
                         order.executed.comm,
-                        margin_used,
                         self.getposition(order.data).size,
                     )
                 )
@@ -307,15 +304,20 @@ class Turtle(bt.Strategy):
                 self.buyprice[order.data] = order.executed.price
 
             elif order.issell():
+                # 保证金占用
+                if pos <= 0:
+                    margin_used = order.executed.value
+                else:
+                    margin_used = -order.executed.value
+
                 self.log(
-                    "SHORT FOR {}, CREATED @ {:.2f}, EXECUTED @ {:.2f}, SIZE {}, COST {:.2f}, COMMISSION {:.2f}, MARGIN {:.2f}, CURPOS {}".format(
+                    "SHORT FOR {}, CREATED @ {:.2f}, EXECUTED @ {:.2f}, SIZE {}, COST {:.2f}, COMMISSION {:.2f}, CURPOS {}".format(
                         dn,
                         order.created.price,
                         order.executed.price,
                         order.executed.size,
                         order.executed.value,
                         order.executed.comm,
-                        margin_used,
                         self.getposition(order.data).size,
                     )
                 )
@@ -326,6 +328,7 @@ class Turtle(bt.Strategy):
                 self.log(f"**INFO** {order.info['name']}")
 
             self.bar_executed = len(self)
+            self.margin_used[order.data] += margin_used
 
         # 处理问题清单
         elif order.status in [order.Canceled, order.Margin, order.Rejected]:
@@ -350,17 +353,17 @@ class Turtle(bt.Strategy):
         for i, d in enumerate(self.datas):
             # 计算年内净值变动
             dt, dn = self.datetime.date().isoformat(), d._name
-            self.reset_margin_and_startvalue(d, dt)
             self.available_margin[d] = self.cal_available_margin(d)
             pos = self.getposition(d).size
 
             if not pos and not self.order.get(d, None):
-                if self.longsig[d]:
-                    self.order[d] = self.buy(data=d)
-                    self.pos_count[d] += 1
-                elif self.shortsig[d]:
-                    self.order[d] = self.sell(data=d)
-                    self.pos_count[d] += 1
+                if not self.is_limit(d):
+                    if self.longsig[d]:
+                        self.order[d] = self.buy(data=d)
+                        self.pos_count[d] += 1
+                    elif self.shortsig[d]:
+                        self.order[d] = self.sell(data=d)
+                        self.pos_count[d] += 1
             else:
                 # 大趋势判断: 若存在正向大趋势，执行紧缩性平仓
                 if self.is_trend(d):
@@ -372,7 +375,7 @@ class Turtle(bt.Strategy):
                     price_change = self.dataclose[d][0] - self.buyprice[d]
 
                     # 多头加仓
-                    if (price_change >= 0.5 * self.atr[d][0]) and (sum(self.pos_count.values()) < self.p.max_pos):
+                    if not self.is_limit(d) and (price_change >= 0.5 * self.atr[d][0]):
                         self.order[d] = self.buy(data=d)
 
                         if self.order[d] is not None:  # size != 0
@@ -384,18 +387,16 @@ class Turtle(bt.Strategy):
                         self.order[d] = self.close(data=d)
                         self.order[d].addinfo(name=f'WINNER CLOSE FOR {dn}')
                         self.pos_count[d] = 0
-                        self.margin_used[d] = 0
                     elif price_change <= -stop_limit * self.atr[d][0]:  # 亏损性退场
                         self.order[d] = self.close(data=d)
                         self.order[d].addinfo(name=f'LOSER CLOSE FOR {dn}')
                         self.pos_count[d] = 0
-                        self.margin_used[d] = 0
 
                 else:
                     price_change = self.dataclose[d][0] - self.sellprice[d]
 
                     # 空头加仓
-                    if (price_change <= -0.5 * self.atr[d][0]) and (sum(self.pos_count.values()) < self.p.max_pos):
+                    if not self.is_limit(d) and (price_change <= -0.5 * self.atr[d][0]):
                         self.order[d] = self.sell(data=d)
                         if self.order[d] is not None:  # size != 0
                             self.pos_count[d] += 1
@@ -406,12 +407,10 @@ class Turtle(bt.Strategy):
                         self.order[d] = self.close(data=d)
                         self.order[d].addinfo(name=f'WINNER CLOSE FOR {dn}')
                         self.pos_count[d] = 0
-                        self.margin_used[d] = 0
                     elif price_change >= stop_limit * self.atr[d][0]:  # 亏损性退场
                         self.order[d] = self.close(data=d)
                         self.order[d].addinfo(name=f'LOSER CLOSE FOR {dn}')
                         self.pos_count[d] = 0
-                        self.margin_used[d] = 0
 
     def stop(self):
         pass
@@ -422,13 +421,13 @@ class Turtle(bt.Strategy):
         ann_nav = current_value / self.start_value[data]
 
         if ann_nav >= 1.1:
-            max_pct = 0.50
-        elif 1.1 > ann_nav >= 1:
-            max_pct = 0.40
-        elif 1 > ann_nav >= 0.95:
             max_pct = 0.30
-        else:
+        elif 1.1 > ann_nav >= 1:
+            max_pct = 0.20
+        elif 1 > ann_nav >= 0.95:
             max_pct = 0.10
+        else:
+            max_pct = 0.05
 
         self.max_margin[data] = max_pct * (self.broker.get_value([data]) + self.start_value[data]) 
         available_margin = self.max_margin[data] - self.margin_used[data]
@@ -451,8 +450,16 @@ class Turtle(bt.Strategy):
         uptrend = high[-1] - buyprice > self.p.bigfloat * atr[0] if buyprice else False
         downtrend = sellprice - high[-1] < -self.p.bigfloat * atr[0] if sellprice else False
 
-        return any([uptrend, downtrend])
+        return uptrend or downtrend
+    
+    def is_limit(self, data):
+        """Check if the limited conditions are satisfied"""
+        limit_conds =[
+            self.pos_count[data] >= self.p.contract_max,
+            sum(self.pos_count.values()) >= self.p.mkt_max
+        ]
 
+        return any(limit_conds)
 
 def run():
     sys.stdout = Logger()
